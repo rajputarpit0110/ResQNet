@@ -1,0 +1,28 @@
+ResQNet Test Report
+Date: 2026-10-22
+Test target: Production preview at http://localhost:4173/
+
+PASS
+- Production build: `cd frontend && npm run build` completed successfully. Vite generated the production bundle, PWA manifest, and Workbox service worker (13 precache entries).
+- Report creation: Submitted a report with a unique test description and non-default form values. Verified its type, severity, people count, generated ID, timestamp, nullable location fields, and Pending sync status in IndexedDB.
+- Persistence: Reloaded the production preview and confirmed the test report remained in IndexedDB and in the Reports list.
+- Optional GPS success path: Stubbed the browser Geolocation API with a test position. Confirmed latitude, longitude, accuracy, capture timestamp, map marker/accuracy circle, Google Maps URL, and GPS data saved on a report.
+- GPS error callbacks: Stubbed permission-denied, position-unavailable, and timeout errors. Each produced its expected temporary feedback; unavailable coordinates were not fabricated.
+- Report deletion: Cancelling the confirmation preserved a test report; confirming deletion removed the test report. The pre-existing report was not deleted.
+- Storage failure handling: Simulated an IndexedDB write failure. The app showed an error message and did not add a report.
+- Network indicator: Browser offline simulation changed the header to Offline; restoring connectivity changed it back to Online.
+- Optional sync failure response: A temporary localhost mock returned HTTP 503. The report stayed Pending sync.
+- Optional sync success response: The localhost mock returned HTTP 201. The report status changed to Synced. The pre-existing report used for this sync check was then restored to Pending sync; the mock server was stopped.
+- Repository state after tests: Git worktree was clean. Temporary test reports were deleted.
+
+WARNINGS
+- `cd frontend && npm run lint` completed with one Oxlint warning: `react(set-state-in-effect)` in `src/screens/ReportsScreen.jsx` during asynchronous initial report loading. Lint exited successfully, but it is not warning-free.
+- The browser harness timed out while trying to complete an offline page reload/cache inspection. The header's offline state was verified, but offline reload behavior is not marked as passed in this run.
+
+NOT TESTED OR NOT FULLY VERIFIED
+- Real geolocation permission prompt and physical-device GPS accuracy. Geolocation success/error callbacks were simulated in browser automation; they were not a real-device GPS test.
+- Offline reload end-to-end. The automation hung during reload while offline, so successful cold/offline reopening was not confirmed in this run.
+- PWA installation on a device/browser. Service-worker registration was active on localhost, but installation was not exercised.
+- A real remote sync backend. Sync behavior was tested against a temporary local mock only; no backend is included with ResQNet.
+- Multi-device synchronization, emergency-service delivery, SMS/push notifications, or responder dashboard. These capabilities are not implemented in this repository.
+- Automated unit/integration test suite: none is defined in the current frontend package scripts.

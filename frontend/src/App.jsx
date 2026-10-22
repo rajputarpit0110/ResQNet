@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useRef } from "react";
 import AppHeader from "./components/AppHeader";
 import BottomNav from "./components/BottomNav";
@@ -6,8 +5,11 @@ import HomeScreen from "./screens/HomeScreen";
 import ReportScreen from "./screens/ReportScreen";
 import LocationScreen from "./screens/LocationScreen";
 import ReportsScreen from "./screens/ReportsScreen";
-import { saveReport } from "./services/reportStorage";
+import PeerShareScreen from "./screens/PeerShareScreen";
+import RescuerDashboard from "./screens/RescuerDashboard";
+import { saveReport, updateReport } from "./services/reportStorage";
 import { isReportSyncConfigured, syncPendingReports } from "./services/reportSync";
+import { triggerEmergencySOS } from "./services/emergencySOS";
 import "./styles/App.css";
 
 export default function App() {
@@ -16,6 +18,8 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [isLocating, setIsLocating] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [activeEmergency, setActiveEmergency] = useState(null);
+  const [reportToEdit, setReportToEdit] = useState(null);
 
   const messageTimer = useRef(null);
 
@@ -29,7 +33,7 @@ export default function App() {
     messageTimer.current = setTimeout(() => {
       setMessage("");
       messageTimer.current = null;
-    }, 1000);
+    }, 2500);
   };
 
   useEffect(() => {
@@ -40,22 +44,30 @@ export default function App() {
     };
   }, []);
 
+  // Background and event-driven report sync
   useEffect(() => {
     if (!isReportSyncConfigured()) return undefined;
 
-    const sync = () => {
+    const runSync = () => {
       syncPendingReports()
         .then((result) => {
-          if (result.synced) {
-            window.dispatchEvent(new Event("resqnet:reports-updated"));
+          if (result && result.synced > 0) {
+            window.dispatchEvent(new CustomEvent("resqnet:reports-updated"));
           }
         })
-        .catch((error) => console.error("Report sync failed:", error));
+        .catch((error) => console.error("Report sync check error:", error));
     };
 
-    if (navigator.onLine) sync();
-    window.addEventListener("online", sync);
-    return () => window.removeEventListener("online", sync);
+    if (navigator.onLine) runSync();
+    window.addEventListener("online", runSync);
+    const periodicTimer = setInterval(() => {
+      if (navigator.onLine) runSync();
+    }, 30000);
+
+    return () => {
+      window.removeEventListener("online", runSync);
+      clearInterval(periodicTimer);
+    };
   }, []);
 
   const handleLocation = () => {
@@ -64,12 +76,10 @@ export default function App() {
       return;
     }
 
-    const isLocalHost = ["localhost", "127.0.0.1"].includes(
-      window.location.hostname,
-    );
+    const isLocalHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
     if (!window.isSecureContext && !isLocalHost) {
-      showMessage("GPS ke liye app ko HTTPS par kholo.");
+      showMessage("GPS requires a secure context (HTTPS or localhost).");
       return;
     }
 
@@ -83,39 +93,71 @@ export default function App() {
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        setLocation({
+        const capturedLoc = {
           latitude: position.coords.latitude,
           longitude: position.coords.longitude,
           accuracy: position.coords.accuracy,
           capturedAt: new Date(position.timestamp || Date.now()).toISOString(),
-        });
-
+        };
+        setLocation(capturedLoc);
         setIsLocating(false);
-        showMessage("GPS location captured successfully.");
+        showMessage("GPS location acquired successfully.");
+
+        // If an active emergency exists without location, update it!
+        if (activeEmergency && !activeEmergency.latitude) {
+          setActiveEmergency((prev) => (prev ? { ...prev, ...capturedLoc } : null));
+        }
       },
       (error) => {
         setIsLocating(false);
 
         const errorMessages = {
-          1: "Location permission denied. Browser settings mein allow karo.",
-          2: "GPS location unavailable. Open sky ke paas try karo.",
-          3: "GPS timeout. Please try again.",
+          1: "Location permission denied. Please allow in browser settings.",
+          2: "GPS location unavailable. Move towards open sky or windows.",
+          3: "GPS request timed out. Please try again.",
         };
 
-        showMessage(
-          errorMessages[error.code] ||
-            "Location nahi mil paayi. Please try again.",
-        );
+        showMessage(errorMessages[error.code] || "Location acquisition failed. Try again.");
       },
       {
         enableHighAccuracy: true,
         timeout: 15000,
         maximumAge: 0,
-      },
+      }
     );
   };
 
-  const handleSOS = () => {
+  // Immediate Triple-Tap or Accessible Emergency SOS trigger
+  const handleTriggerSOS = async ({ source = "triple_tap" } = {}) => {
+    try {
+      const sosReport = await triggerEmergencySOS({
+        source,
+        existingLocation: location,
+        onProgress: (status) => {
+          if (status.phase === "saved") {
+            setActiveEmergency(status.report);
+            showMessage(`SOS ACTIVATED: Report #${status.report.id} saved on this device!`);
+          } else if (status.phase === "gps_acquired") {
+            setActiveEmergency(status.report);
+            showMessage("GPS fix acquired & attached to emergency report.");
+          }
+        },
+      });
+
+      setActiveEmergency(sosReport);
+    } catch (err) {
+      console.error("SOS trigger failed:", err);
+      showMessage("Failed to trigger SOS. Check device storage.");
+    }
+  };
+
+  const handleOpenManualForm = () => {
+    setReportToEdit(null);
+    setActiveTab("report");
+  };
+
+  const handleAddDetails = (report) => {
+    setReportToEdit(report);
     setActiveTab("report");
   };
 
@@ -123,25 +165,57 @@ export default function App() {
     if (isSubmitting) return false;
 
     setIsSubmitting(true);
-    const report = {
-      ...form,
-      id: `RQ-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`,
-      latitude: location?.latitude ?? null,
-      longitude: location?.longitude ?? null,
-      accuracy: location?.accuracy ?? null,
-      locationCapturedAt: location?.capturedAt ?? null,
-      createdAt: new Date().toISOString(),
-      status: "Pending sync",
-    };
 
     try {
-      await saveReport(report);
-      showMessage(`Report ${report.id} saved on this device.`);
+      if (form.id) {
+        // Updating an existing report (e.g. adding details to an SOS report)
+        const updated = await updateReport(form.id, {
+          type: form.type,
+          severity: form.severity,
+          people: form.people,
+          description: form.description,
+          contactName: form.contactName,
+          contactPhone: form.contactPhone,
+          photoDataUrl: form.photoDataUrl,
+          audioDataUrl: form.audioDataUrl,
+          status: "pending_cloud_sync",
+        });
+        showMessage(`Report ${form.id} updated with new details.`);
+        window.dispatchEvent(new CustomEvent("resqnet:reports-updated"));
+        if (activeEmergency?.id === form.id) {
+          setActiveEmergency(updated);
+        }
+      } else {
+        // Creating a new report
+        const report = {
+          ...form,
+          id: `RQ-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`}`,
+          latitude: location?.latitude ?? null,
+          longitude: location?.longitude ?? null,
+          accuracy: location?.accuracy ?? null,
+          locationCapturedAt: location?.capturedAt ?? null,
+          locationStatus: location ? "acquired" : "unavailable",
+          createdAt: new Date().toISOString(),
+          status: "pending_cloud_sync",
+        };
+
+        await saveReport(report);
+        showMessage(`Emergency report ${report.id} saved locally.`);
+        window.dispatchEvent(new CustomEvent("resqnet:reports-updated"));
+      }
+
+      setReportToEdit(null);
       setActiveTab("reports");
+
+      // Attempt immediate background sync if online
+      if (navigator.onLine) {
+        syncPendingReports().catch(() => {});
+      }
+
       return true;
     } catch (error) {
       console.error("Failed to save report:", error);
-      showMessage("Report save nahi hui. Please try again.");
+      showMessage("Could not save report. Storage might be full.");
       return false;
     } finally {
       setIsSubmitting(false);
@@ -155,14 +229,21 @@ export default function App() {
       <section className="screen-area">
         {activeTab === "home" && (
           <HomeScreen
-            onSOS={handleSOS}
+            onManualReport={handleOpenManualForm}
+            onTriggerSOS={handleTriggerSOS}
             onLocation={handleLocation}
             location={location}
+            activeEmergency={activeEmergency}
+            onAddDetails={handleAddDetails}
           />
         )}
 
         {activeTab === "report" && (
-          <ReportScreen onSubmit={handleSubmitReport} isSubmitting={isSubmitting} />
+          <ReportScreen
+            onSubmit={handleSubmitReport}
+            isSubmitting={isSubmitting}
+            initialReport={reportToEdit}
+          />
         )}
 
         {activeTab === "location" && (
@@ -173,7 +254,13 @@ export default function App() {
           />
         )}
 
-        {activeTab === "reports" && <ReportsScreen />}
+        {activeTab === "reports" && (
+          <ReportsScreen onSelectReportForEdit={handleAddDetails} />
+        )}
+
+        {activeTab === "mesh" && <PeerShareScreen />}
+
+        {activeTab === "rescuer" && <RescuerDashboard />}
       </section>
 
       {message && (
@@ -186,7 +273,7 @@ export default function App() {
             }
             setMessage("");
           }}
-          aria-label="Dismiss message"
+          aria-label="Dismiss notification"
         >
           {message} ×
         </button>

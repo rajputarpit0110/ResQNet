@@ -1,28 +1,52 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { deleteReport, getReports } from "../services/reportStorage";
 
-export default function ReportsScreen() {
+export default function ReportsScreen({ onSelectReportForEdit }) {
   const [reports, setReports] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [deletingId, setDeletingId] = useState(null);
 
-  const loadReports = async () => {
+  const loadReports = useCallback(async () => {
     try {
-      setReports(await getReports());
+      const data = await getReports();
+      setReports(data);
+      setError("");
     } catch (loadError) {
       console.error("Could not load reports:", loadError);
       setError("Reports could not be loaded from this device.");
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    loadReports();
-    window.addEventListener("resqnet:reports-updated", loadReports);
-    return () => window.removeEventListener("resqnet:reports-updated", loadReports);
-  }, []);
+    let active = true;
+    getReports()
+      .then((data) => {
+        if (active) {
+          setReports(data);
+          setIsLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (active) {
+          console.error("Initial load failed:", err);
+          setError("Reports could not be loaded from this device.");
+          setIsLoading(false);
+        }
+      });
+
+    const handleUpdate = () => {
+      loadReports();
+    };
+
+    window.addEventListener("resqnet:reports-updated", handleUpdate);
+    return () => {
+      active = false;
+      window.removeEventListener("resqnet:reports-updated", handleUpdate);
+    };
+  }, [loadReports]);
 
   const retryLoadingReports = () => {
     setIsLoading(true);
@@ -44,6 +68,20 @@ export default function ReportsScreen() {
     } finally {
       setDeletingId(null);
     }
+  };
+
+  const getStatusBadge = (status) => {
+    const s = (status || "pending_cloud_sync").toLowerCase();
+    if (s === "synced") {
+      return <span className="sync-tag synced">Synced to Cloud ✓</span>;
+    }
+    if (s === "syncing") {
+      return <span className="sync-tag syncing">Syncing...</span>;
+    }
+    if (s === "failed_retryable") {
+      return <span className="sync-tag failed">Retrying Sync</span>;
+    }
+    return <span className="sync-tag pending">Pending Cloud Sync</span>;
   };
 
   return (
@@ -81,7 +119,15 @@ export default function ReportsScreen() {
                   {report.severity || "Severity unknown"}
                 </span>
               </div>
-              <h3>{report.id}</h3>
+              <div className="report-id-row">
+                <h3>{report.id}</h3>
+                {report.revision > 1 && (
+                  <span className="rev-badge">Rev {report.revision}</span>
+                )}
+                {report.relayHops > 0 && (
+                  <span className="relay-badge">Relayed ({report.relayHops} {report.relayHops === 1 ? "hop" : "hops"})</span>
+                )}
+              </div>
               <p>
                 {report.description || "No additional details provided."}
               </p>
@@ -93,15 +139,31 @@ export default function ReportsScreen() {
                   </a>
                 ) : <span>Location not captured</span>}
                 {report.accuracy != null && <span>GPS accuracy ±{Math.round(report.accuracy)} m</span>}
-                {report.locationCapturedAt && <span>GPS captured {new Date(report.locationCapturedAt).toLocaleString()}</span>}
+                {report.locationCapturedAt && <span>GPS captured {new Date(report.locationCapturedAt).toLocaleTimeString()}</span>}
+                {report.batteryLevel != null && <span>Battery {report.batteryLevel}%</span>}
               </div>
               <div className="report-card-bottom">
                 <span>{new Date(report.createdAt).toLocaleString()}</span>
-                <span className="pending-tag">{report.status || "Pending sync"}</span>
+                {getStatusBadge(report.status)}
               </div>
-              <button className="delete-report" onClick={() => handleDelete(report)} disabled={deletingId === report.id} aria-label={`Delete report ${report.id}`}>
-                {deletingId === report.id ? "Deleting..." : "Delete report"}
-              </button>
+              <div className="report-card-actions">
+                {onSelectReportForEdit && (
+                  <button
+                    className="text-button edit-btn"
+                    onClick={() => onSelectReportForEdit(report)}
+                  >
+                    + Add details / edit
+                  </button>
+                )}
+                <button
+                  className="delete-report"
+                  onClick={() => handleDelete(report)}
+                  disabled={deletingId === report.id}
+                  aria-label={`Delete report ${report.id}`}
+                >
+                  {deletingId === report.id ? "Deleting..." : "Delete report"}
+                </button>
+              </div>
             </article>
           ))}
         </div>

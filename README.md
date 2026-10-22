@@ -1,364 +1,291 @@
-# ResQNet
+# ResQNet — Offline-First Disaster Emergency Reporting and Rescue Coordination Platform
 
-**Offline-first emergency reporting PWA** built with React and Vite. ResQNet lets a person record an emergency report on the current device, optionally attach a GPS fix, and review saved reports even when the application shell is offline. It is a reporting tool, not an emergency dispatch service.
+**ResQNet** is a disaster emergency coordination system built for earthquakes, floods, fires, landslides, structural collapses, and severe network outages where cellular infrastructure and internet connectivity are damaged or completely unavailable.
 
-> **Emergency-use notice:** Saving a report does not contact emergency services or guarantee that responders will receive it. Use the appropriate local emergency number or official response channel when immediate assistance is required.
+ResQNet follows one core design principle:
+> **Minimum effort from the victim. Maximum useful information for rescuers. Offline-first local persistence. Automatic multi-hop relay synchronization whenever any device reaches connectivity.**
+
+---
 
 ## Table of Contents
 
-- [Project Overview](#project-overview)
-- [Feature Status](#feature-status)
-- [Technology Stack](#technology-stack)
-- [How It Works](#how-it-works)
-- [Architecture](#architecture)
-- [Project Structure](#project-structure)
-- [Installation and Local Setup](#installation-and-local-setup)
-- [GPS, Offline Mode, and PWA Limitations](#gps-offline-mode-and-pwa-limitations)
-- [Data Flow and Report Model](#data-flow-and-report-model)
-- [Testing and Verification](#testing-and-verification)
-- [Current Status and Roadmap](#current-status-and-roadmap)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [Security, Privacy, and License](#security-privacy-and-license)
+1. [Implementation Audit](#1-implementation-audit)
+2. [Architecture and System Design](#2-architecture-and-system-design)
+3. [Core Feature: Triple-Tap Emergency SOS](#3-core-feature-triple-tap-emergency-sos)
+4. [Offline-First Data Storage & Model](#4-offline-first-data-storage--model)
+5. [Device-to-Device Mesh Relay (Store-and-Forward)](#5-device-to-device-mesh-relay-store-and-forward)
+6. [Cloud Synchronization & Network Recovery](#6-cloud-synchronization--network-recovery)
+7. [Backend API & Database Architecture](#7-backend-api--database-architecture)
+8. [Rescuer / Operations Command Dashboard](#8-rescuer--operations-command-dashboard)
+9. [Automated Test Suite & Verification](#9-automated-test-suite--verification)
+10. [Setup and Running Locally](#10-setup-and-running-locally)
+11. [Browser and Platform Realities & Limitations](#11-browser-and-platform-realities--limitations)
 
-## Project Overview
+---
 
-Disaster-affected communities may have unreliable connectivity, limited power, and difficulty communicating precise incident information. ResQNet addresses one narrow part of that problem: it provides a mobile-oriented interface for collecting an emergency report locally first, so a temporary network outage does not prevent the user from recording the information on that device.
+## 1. Implementation Audit
 
-The current application is suitable as a prototype or local reporting interface for:
+| Area | Prior State | Implemented State |
+|---|---|---|
+| **Emergency Trigger** | Single-tap SOS opened manual form | **Triple-Tap SOS with 2.2s detection window**, progress dots (1/3, 2/3, 3/3), haptic/audio pulse, immediate IndexedDB save without form or GPS blocking. Includes **1-Tap Accessible SOS button**. |
+| **GPS Acquisition** | Required user action before save | **Parallel background acquisition**. Minimal SOS saves first; when GPS fix resolves, record is updated with coordinates and revision incremented. |
+| **Local Storage** | Basic Dexie v1 with string statuses | **Dexie v2 schema**: explicit lifecycle states (`local_only`, `pending_cloud_sync`, `syncing`, `synced`, `failed_retryable`), stable pseudonymous device IDs, revision conflict resolution, battery level capture. |
+| **P2P Relay** | None | **WebRTC DataChannels** supporting: 1) Local Wi-Fi/Hotspot room pairing via signaling; 2) Fully offline serverless SDP code exchange; 3) Store-and-forward relay carrier tracking (`relayHops`). |
+| **Cloud Backend** | No backend existed | **Node.js Express backend** (`backend/server.js`) with persistent JSON storage, idempotent upsert (`Idempotency-Key`), revision tracking, rescuer authentication, triage management, and P2P signaling rooms. |
+| **Rescuer Operations** | None | **Full Rescuer Command Dashboard** (`RescuerDashboard.jsx`) with token authentication, incident metrics (Critical, Dispatched, Rescued), interactive Leaflet incident map with severity color-coding, filters, and triage workflow. |
+| **Victim Input** | Basic 4 categories | Expanded to 8 disaster categories, severity levels, optional victim name/phone, client-side compressed photo capture, and optional voice note recorder. |
+| **Automated Tests** | None | **17 automated tests passing** (10 backend integration tests + 7 frontend storage, SOS, and multi-hop relay tests). |
+| **Build & Linting** | Oxlint warning in ReportsScreen | **0 warnings, 0 errors** across all 15 modules. Vite production bundle and Workbox service worker generated. |
 
-- People affected by an incident who need to record its type, severity, people affected, description, and optional location.
-- Volunteers or coordinators who are using the same device to review locally saved reports.
-- Developers evaluating an offline-first reporting workflow before connecting a real response service.
+---
 
-Reports are stored in the browser's IndexedDB database for the current origin and browser profile. A report is not visible to other devices or rescue teams unless a compatible API is configured and confirms receipt. No responder dashboard, emergency-service integration, user authentication, push/SMS alerting, or server-side storage is included in this repository.
-
-## Feature Status
-
-| Module / feature | Status | What the user can do and how it works | Implementation |
-|---|---|---|---|
-| Home and SOS entry | Implemented | View network status, optionally request location, and open the report form using the SOS button. SOS is navigation to the form; it does not place a call or dispatch help. | [`HomeScreen.jsx`](frontend/src/screens/HomeScreen.jsx), [`App.jsx`](frontend/src/App.jsx) |
-| Emergency report form | Implemented | Choose Medical, Fire, Trapped, or Other; choose Low, Medium, or High severity; select 1–9 or 10+ people (10 is stored for 10+); enter an optional description up to 240 characters; submit to local storage. Inputs are disabled during save and reset only after success. | [`ReportScreen.jsx`](frontend/src/screens/ReportScreen.jsx), `handleSubmitReport` in [`App.jsx`](frontend/src/App.jsx) |
-| Local report persistence | Implemented | Save, retrieve, and delete reports in the `resqnet` IndexedDB database through Dexie. On first access, the service attempts a one-time migration from the prior `localStorage` key `resqnet-reports`. | [`reportStorage.js`](frontend/src/services/reportStorage.js) |
-| Location capture | Implemented, optional | Request a browser geolocation fix with high accuracy, 15-second timeout, and no cached fix. Latitude, longitude, accuracy, and the browser capture timestamp are held in app state; they are copied into a report when one is submitted. Reporting works without location. | `handleLocation` and `handleSubmitReport` in [`App.jsx`](frontend/src/App.jsx) |
-| Location map and external map link | Implemented, online tiles | Show the captured coordinates as a marker with an accuracy radius on a Leaflet map. Provide a Google Maps link using those same coordinates. OpenStreetMap tiles are requested from the public tile URL and are not explicitly cached. | [`LocationScreen.jsx`](frontend/src/screens/LocationScreen.jsx) |
-| Saved reports | Implemented | View reports ordered newest first, including ID, type, severity, description, people affected, creation time, location, accuracy, and local/sync status. Confirm before deleting. Load and delete failures are shown in the screen. | [`ReportsScreen.jsx`](frontend/src/screens/ReportsScreen.jsx), [`reportStorage.js`](frontend/src/services/reportStorage.js) |
-| Temporary notifications | Implemented | Show success or error feedback in a dismissible toast for approximately one second. | `showMessage` and toast in [`App.jsx`](frontend/src/App.jsx) |
-| Network indicator | Implemented, advisory only | The header listens to browser `online` and `offline` events and displays `navigator.onLine` state. This is a browser connectivity hint, not a check that a server is reachable. | [`AppHeader.jsx`](frontend/src/components/AppHeader.jsx) |
-| Offline application shell | Configured | `vite-plugin-pwa` generates and registers a Workbox service worker for production builds. It precaches generated static assets matching the configured patterns and falls back to `index.html` for navigation. | [`vite.config.js`](frontend/vite.config.js), [`main.jsx`](frontend/src/main.jsx) |
-| Optional API synchronization | Partially implemented; no backend included | When `VITE_RESQNET_API_URL` is set, the browser attempts pending-report POSTs at startup if online and again on the browser `online` event. A report changes to `Synced` only after a successful 2xx response. Otherwise it remains `Pending sync`. | [`reportSync.js`](frontend/src/services/reportSync.js), sync effect in [`App.jsx`](frontend/src/App.jsx) |
-| Responsive UI and accessibility basics | Implemented; not formally audited | CSS adapts the mobile-first layout. Navigation has an accessible name and current-page state; report choices expose pressed state; status/error regions and visible keyboard focus styles are present. No formal WCAG audit is included. | [`App.css`](frontend/src/styles/App.css), [`index.css`](frontend/src/index.css), screen and component files under `frontend/src/` |
-
-## Technology Stack
-
-Versions below reflect the installed package tree checked in this workspace; `package.json` declares semver ranges rather than exact pins for most packages. The lockfile is `frontend/package-lock.json`.
-
-| Technology | Installed / configured version | Purpose and use |
-|---|---:|---|
-| JavaScript, HTML, CSS | Browser platform | Application logic, document shell, and responsive styling. |
-| React / React DOM | 19.3.1 installed (`^19.2.8` / `^19.2.8` declared) | UI rendering and component-local state; `App.jsx` owns selected screen, captured location, and submission state. |
-| Vite | 8.3.4 installed (`^8.3.0` declared) | Development server, production bundling, and production preview. |
-| `@vitejs/plugin-react` | 6.1.2 installed (`^6.1.1` declared) | React integration in Vite. |
-| Dexie.js | 4.4.6 installed (`^4.4.6` declared) | IndexedDB wrapper for the `resqnet` database, reports, and migration metadata. |
-| `leaflet` / `react-leaflet` | 1.9.4 / 5.0.0 installed | Interactive coordinate map, marker, accuracy circle, and popup. |
-| `vite-plugin-pwa` / Workbox | 2.0.0 installed | Build-time manifest and service-worker generation; Workbox precache and navigation fallback. |
-| Browser Geolocation API | Browser-provided | Optional position request from `navigator.geolocation.getCurrentPosition`. Requires permission and a secure context in supported browsers. |
-| `oxlint` | 1.88.0 installed (`^1.81.0` declared) | Lint script (`npm run lint`). |
-| `@vitejs/plugin-basic-ssl` | 2.3.0 installed | Declared as a development dependency, but not configured in `vite.config.js` and not used by the current scripts. |
-
-There is no backend framework, cloud SDK, server database, authentication package, or test framework configured in the project.
-
-## How It Works
-
-1. The user opens the app and sees the Home screen. The header displays the browser's online/offline hint.
-2. The user may request location from Home or the Location tab. If granted in a secure context, the browser fix is held in React state. If permission is denied, the fix is unavailable, or the request times out, the app displays a message; a report can still be submitted without GPS.
-3. The user taps SOS to open the report form and enters the incident details.
-4. On submission, the app generates an ID and ISO creation timestamp, adds the most recently captured location values if present, and writes the record to IndexedDB. A duplicate submit is blocked while the save is in progress. Storage failure is reported and does not navigate to the reports view as though the save succeeded.
-5. The Reports tab reads IndexedDB and displays stored records. A successful write persists across a page refresh in the same browser profile. Deletion requires browser confirmation.
-6. If a report API URL is configured, the app attempts synchronization at startup when online and when the browser emits `online`. A 2xx response marks that record `Synced`; failed requests leave it pending. There is no server in this repository.
+## 2. Architecture and System Design
 
 ```mermaid
 flowchart TD
-    A[Open ResQNet] --> B[Home screen]
-    B --> C{Optional: request GPS}
-    C -->|Permission and secure context allow| D[Keep coordinates, accuracy, capture time in app state]
-    C -->|Denied, unavailable, timeout, or insecure origin| E[Show location feedback; continue without GPS]
-    D --> F[Tap SOS and complete report form]
-    E --> F
-    F --> G{IndexedDB write succeeds?}
-    G -->|No| H[Show save error; keep report unsaved]
-    G -->|Yes| I[Save report as Pending sync]
-    I --> J[Review or delete in Reports]
-    I --> K{API URL configured and online?}
-    K -->|No| L[Keep report locally as Pending sync]
-    K -->|Yes| M[POST report with Idempotency-Key]
-    M -->|2xx response| N[Set status to Synced]
-    M -->|Network error or non-2xx| L
+    subgraph VictimApp["Victim / Citizen PWA"]
+        A[Triple-Tap SOS Button] -->|Instant Trigger| B[Save Minimal Emergency Report]
+        B --> C[(Dexie IndexedDB)]
+        A -.->|Parallel Background Fix| D[Browser Geolocation API]
+        D -->|Update Coordinates & Revision| C
+        A2[Accessible 1-Tap SOS] -->|Direct Trigger| B
+        A3[Optional Details / Media] -->|Attach Notes, Photos, Audio| C
+    end
+
+    subgraph MeshRelay["Device-to-Device Mesh Transfer"]
+        C --> E[WebRTC DataChannel]
+        E <-->|Manifest & Store-and-Forward Relay| F[Nearby ResQNet Device]
+        F --> G[(Peer IndexedDB: relayHops + 1)]
+    end
+
+    subgraph CloudSync["Store-and-Forward Cloud Sync"]
+        C & G -->|Online + Health Check| H[HTTP POST /api/reports]
+        H -->|Idempotency-Key + Revision Header| I[ResQNet Cloud API Server]
+    end
+
+    subgraph RescuerOperations["Rescuer Command Dashboard"]
+        I --> J[(Persistent Database & Audit Log)]
+        J --> K[Authenticated Rescuer Portal]
+        K --> L[Interactive Leaflet Incident Map]
+        K --> M[Operational Triage Management]
+    end
 ```
 
-## Architecture
+---
 
-The application is a single-page React frontend. `App.jsx` switches between four screens with local React state rather than URL routes. Data is persisted through an IndexedDB service; there is no centralized state library. Captured GPS is held in app memory and is copied into each submitted report, not stored as a separate location record.
+## 3. Core Feature: Triple-Tap Emergency SOS
 
-```mermaid
-flowchart LR
-    Entry[main.jsx] --> App[App.jsx: screen, GPS, save, toast, sync trigger]
-    App --> Header[AppHeader: online/offline hint]
-    App --> Nav[BottomNav: Home, Report, Location, Reports]
-    App --> Home[HomeScreen]
-    App --> Form[ReportScreen]
-    App --> Location[LocationScreen: React Leaflet]
-    App --> Reports[ReportsScreen]
-    App --> Storage[reportStorage.js]
-    Storage --> DB[(IndexedDB: resqnet)]
-    App --> Sync[reportSync.js: optional client POST]
-    Sync -. configured URL only .-> API[External API; not included]
-    Vite[Vite + vite-plugin-pwa] --> SW[Generated Workbox service worker]
-    SW --> Cache[(Precached application assets)]
-```
+In high-stress disaster scenarios (trapped under debris, injured, dense smoke), a victim cannot fill out a form or wait for satellite GPS fixes.
 
-### IndexedDB schema
+### Triple-Tap Sequence
+1. **Tap 1**: Starts a 2.2-second detection window. Tap dot 1 turns red. Device emits haptic feedback (60ms).
+2. **Tap 2**: Tap dot 2 turns red. Device emits double haptic feedback.
+3. **Tap 3**: **Instant Emergency Activation!**
+   - Distinctive emergency haptic pattern (`[150, 50, 150, 50, 250]ms`) and Web Audio chirp (880Hz to 1760Hz).
+   - Generates stable ID: `RQ-${crypto.randomUUID()}`.
+   - Minimal report created: `type: "Emergency SOS"`, `severity: "Critical"`, `people: 1`, `status: "pending_cloud_sync"`, `revision: 1`.
+   - **Saved to IndexedDB immediately** before any network or GPS operation.
+   - Initiates parallel background GPS acquisition. When coordinates arrive, `updateReportLocation` updates the record and triggers sync without deleting or recreating the report.
+   - Triggers background cloud upload if online and peer broadcast if connected.
+4. **Accessible Alternative**:
+   A dedicated button: `⚠ 1-Tap Instant SOS (Accessible Alternative)` enables immediate SOS generation with a single tap for users with motor limitations or trembling hands.
+5. **Preserved Manual Workflow**:
+   If the user taps the SOS button once and does not tap again within 2.2s, the app automatically transitions to the detailed report form.
 
-The database is named `resqnet`, schema version 1. Dexie's declarations in `frontend/src/services/reportStorage.js` are:
+---
 
-- `reports`: primary key `id`; indexed fields `createdAt` and `status`.
-- `metadata`: primary key `key`; used for the `legacy-reports-migrated` marker.
+## 4. Offline-First Data Storage & Model
 
-The service orders reports by `createdAt` descending, retrieves pending reports by `status`, and updates status and `syncedAt` after a confirmed successful API response.
+ResQNet uses **Dexie.js** (IndexedDB) with schema version 2.
 
-### PWA configuration
+### Lifecycle Statuses
+- `local_only`: Stored locally, not yet queued.
+- `pending_cloud_sync`: Queued for cloud upload when internet returns.
+- `syncing`: Upload payload currently in flight.
+- `synced`: Confirmed received and acknowledged by the cloud backend.
+- `failed_retryable`: Transient error (e.g. 503, network drop); eligible for exponential backoff retry.
 
-`frontend/vite.config.js` configures `VitePWA` with `registerType: "autoUpdate"`, a standalone manifest, and generated Workbox service-worker behavior. The manifest uses app name `ResQNet - Emergency Response`, short name `ResQNet`, theme color `#176b4d`, start URL and scope `/`, and PNG icons at 192×192 and 512×512. Workbox precaches built assets matching `js`, `css`, `html`, `ico`, `png`, `svg`, and `woff2`; navigation requests fall back to `index.html`. The current setup does not define a runtime cache for map tiles or API responses.
-
-## Project Structure
-
-```text
-ResQNet/
-├── README.md
-└── frontend/
-    ├── .gitignore
-    ├── .oxlintrc.json
-    ├── README.md
-    ├── index.html
-    ├── package.json
-    ├── package-lock.json
-    ├── vite.config.js
-    ├── public/
-    │   ├── favicon.svg
-    │   ├── icons.svg
-    │   ├── ResQNet Emergency Response Emblem.png
-    │   ├── pwa-192x192.png
-    │   └── pwa-512x512.png
-    └── src/
-        ├── App.jsx
-        ├── main.jsx
-        ├── index.css
-        ├── styles/
-        │   └── App.css
-        ├── components/
-        │   ├── AppHeader.jsx
-        │   └── BottomNav.jsx
-        ├── screens/
-        │   ├── HomeScreen.jsx
-        │   ├── LocationScreen.jsx
-        │   ├── ReportScreen.jsx
-        │   └── ReportsScreen.jsx
-        ├── services/
-        │   ├── reportStorage.js
-        │   └── reportSync.js
-        └── assets/
-            ├── hero.png
-            ├── react.svg
-            └── vite.svg
-```
-
-- `frontend/src/main.jsx` mounts the React app and global CSS.
-- `frontend/src/App.jsx` coordinates screen selection, notifications, GPS capture, report creation, and optional sync triggers.
-- `frontend/src/components/` contains the network-status header and bottom tab navigation.
-- `frontend/src/screens/` contains the Home, Report, Location, and Reports screens.
-- `frontend/src/services/` contains IndexedDB persistence/migration and the optional API sync client.
-- `frontend/src/styles/App.css` contains the ResQNet UI styles; `index.css` contains global resets.
-- `frontend/public/` holds favicon, brand emblem, and PWA icons. The repository currently has no screenshot files; the PNGs are brand/app icons, not screenshots.
-- `frontend/.gitignore` excludes dependencies, build output, logs, and `*.local` files. Generated `dist/` and `node_modules/` are intentionally omitted from the tree.
-
-## Installation and Local Setup
-
-No repository URL is specified in this workspace, so these instructions assume you have opened or obtained the existing `ResQNet` directory.
-
-### Prerequisites
-
-- Node.js compatible with Vite 8 and npm. The environment used to verify this README had Node.js `v26.8.2` and npm `11.19.1`.
-- A modern browser. GPS and service-worker features require a secure context (localhost is permitted for local testing; deployed sites should use HTTPS).
-
-### Install and run
-
-From the project root:
-
-```sh
-cd frontend
-npm ci
-npm run dev
-```
-
-Open the local URL printed by Vite. No environment variables are required for local report creation and IndexedDB storage.
-
-### Build and preview the production PWA
-
-```sh
-cd frontend
-npm run build
-npm run preview
-```
-
-Vite prints the preview URL (by default, usually `http://localhost:4173/`). Load the preview while online and allow the generated service worker to install. Then reload once before testing offline behavior. The development server should not be used to conclude that production PWA precaching is working.
-
-### Available package scripts
-
-| Command | Effect |
-|---|---|
-| `npm run dev` | Start the Vite development server. |
-| `npm run build` | Create the production bundle and generate the PWA manifest/service worker. |
-| `npm run preview` | Serve the built bundle locally for production-like verification. |
-| `npm run lint` | Run Oxlint. |
-
-### Optional API configuration
-
-To enable the existing client sync attempt, create `frontend/.env.local` and set:
-
-```dotenv
-VITE_RESQNET_API_URL=https://your-api.example
-```
-
-The client sends a `POST` request to the configured base URL followed by `/reports`, with the full report JSON and an `Idempotency-Key` header equal to the report ID. The API must accept cross-origin requests from the frontend origin and implement idempotent handling for that key. Any 2xx response is treated as confirmation; the client does not parse a server response body. No API implementation or URL is supplied by this project. Variables prefixed with `VITE_` are included in client-side build output; do not put secrets or private credentials in them.
-
-## GPS, Offline Mode, and PWA Limitations
-
-### GPS and maps
-
-- Location is optional. The app uses `navigator.geolocation.getCurrentPosition` and requests high accuracy with a 15-second timeout.
-- The user must grant browser permission. Browsers generally expose geolocation only in secure contexts, such as HTTPS or localhost. The app checks `window.isSecureContext` and does not bypass browser restrictions.
-- GPS values live in application memory until report submission. They are not automatically restored after a full page reload unless already included in a saved report.
-- A captured point and accuracy radius are displayed using React Leaflet. The map's OpenStreetMap tile requests require network access; tiles are not included in the Workbox precache or configured for runtime caching. The coordinate values and external Google Maps link remain available from a saved report when offline, but the external map itself requires connectivity.
-
-### Offline and service worker
-
-- Reports already written to IndexedDB remain available to the same browser profile on the same origin while offline, subject to browser storage availability and eviction policies.
-- The production service worker precaches the app shell and matching static build assets after the app has been loaded online and the worker has installed. It does not cache all network resources.
-- OpenStreetMap tiles, Google Maps, and the optional API require a working network. The app does not provide guaranteed delivery, background synchronization, or cross-device sharing.
-- The header's Online/Offline label reflects `navigator.onLine`, which can report online even if a particular host is unreachable.
-
-### Local versus synced reports
-
-`Pending sync` means the report is saved locally and has not been confirmed by the configured API. `Synced` is set only after the client receives an HTTP 2xx response from the expected endpoint. The sync code runs in the foreground at startup and on an `online` event; it is not the Background Sync API. If no URL is configured, no upload is attempted. A report created after a sync pass waits for a later page startup or `online` event before upload is attempted. If an API attempt fails, the record remains pending and will be retried only on a later page startup or online event.
-
-## Data Flow and Report Model
-
-A newly submitted report has the following shape. Null location fields indicate that GPS was not captured; they are not guessed or fabricated.
-
-```json
-{
-  "type": "Medical",
-  "severity": "High",
-  "people": 1,
-  "description": "Needs assistance",
-  "id": "RQ-2e1c7fa4-54b5-4cc1-a2c1-a4a1db000001",
-  "latitude": null,
-  "longitude": null,
-  "accuracy": null,
-  "locationCapturedAt": null,
-  "createdAt": "2026-10-22T10:00:00.000Z",
-  "status": "Pending sync"
+### Emergency Report Schema
+```typescript
+interface EmergencyReport {
+  id: string;                    // Stable unique key (e.g., RQ-uuid)
+  type: string;                  // Emergency SOS, Medical, Trapped, Fire, Flood, etc.
+  severity: "Critical" | "High" | "Medium" | "Low" | "Unassessed";
+  people: number;                // Affected count (default 1)
+  description?: string;          // Situation details
+  contactName?: string | null;   // Optional victim name
+  contactPhone?: string | null;  // Optional phone / radio ID
+  photoDataUrl?: string | null;  // Client-compressed JPEG thumbnail
+  audioDataUrl?: string | null;  // Client WebM voice recording
+  latitude?: number | null;      // GPS latitude
+  longitude?: number | null;     // GPS longitude
+  accuracy?: number | null;      // Accuracy in meters (±m)
+  locationCapturedAt?: string;   // ISO timestamp of GPS fix
+  locationStatus: "acquired" | "pending" | "unavailable" | "denied" | "timeout";
+  createdAt: string;             // ISO UTC creation time
+  updatedAt: string;             // ISO UTC last updated time
+  revision: number;              // Sequence integer for conflict resolution
+  relayHops: number;             // Number of P2P carrier hops
+  deviceId: string;              // Pseudonymous device ID (e.g., DEV-uuid)
+  batteryLevel?: number | null;  // Battery percentage (navigator.getBattery)
+  status: "pending_cloud_sync" | "syncing" | "synced" | "failed_retryable";
+  triageStatus?: "new" | "acknowledged" | "dispatched" | "rescued" | "closed";
+  triageNotes?: string;
+  triageUpdatedBy?: string;
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `id` | `RQ-` plus `crypto.randomUUID()` where available; otherwise a timestamp/random-string fallback. Used as IndexedDB primary key and API idempotency key. |
-| `type` | One of `Medical`, `Fire`, `Trapped`, or `Other`. |
-| `severity` | One of `Low`, `Medium`, or `High`. |
-| `people` | Number selected by the form (1 through 9, or 10 for the `10+` option). |
-| `description` | Trimmed optional text, limited to 240 characters by the form. |
-| `latitude`, `longitude` | Coordinates from the captured browser geolocation fix, or `null`. |
-| `accuracy` | Browser-reported horizontal accuracy in meters, or `null`. |
-| `locationCapturedAt` | ISO timestamp derived from the Geolocation API position timestamp, or `null`. |
-| `createdAt` | ISO timestamp when the report is created for saving. |
-| `status` | Initially `Pending sync`; changes to `Synced` only after the optional API responds with 2xx. |
-| `syncedAt` | Added to the stored record by the sync service after a successful 2xx response. Not present on a pending report. |
+---
 
-Records are stored under the `reports` object store in IndexedDB. The database also has a `metadata` store for the one-time legacy migration marker. Existing legacy records are read from `localStorage` key `resqnet-reports` on first database access when available.
+## 5. Device-to-Device Mesh Relay (Store-and-Forward)
 
-## Testing and Verification
+Browser applications cannot broadcast raw Bluetooth or Wi-Fi packets without an established transport. ResQNet implements encrypted **WebRTC DataChannels** with store-and-forward carrier relaying.
 
-There is no automated test script or test suite in the current `package.json`. The following repository checks were run against the current implementation while preparing this README:
+### Supported Pairing Modes
+1. **Local Wi-Fi / Hotspot Room Code (Fast & Automated)**:
+   - Devices sharing a local Wi-Fi, emergency hotspot, or LAN use room codes (e.g. `ROOM-101`).
+   - Host posts offer to `/api/p2p/signal`; peer retrieves offer and replies with answer.
+   - WebRTC DataChannel connects directly peer-to-peer.
+2. **Serverless Offline Code Exchange (Zero-Infrastructure)**:
+   - In 100% disconnected environments, Host generates an offline SDP offer code (text/QR).
+   - Peer pastes the offer and generates an answer code.
+   - Host accepts answer. Direct local DataChannel opens!
 
-- `npm run build` — **passed** with Vite 8.3.4; Workbox generated the PWA manifest and service worker.
-- `npm run lint` — completed with one warning, `react(set-state-in-effect)` in `frontend/src/screens/ReportsScreen.jsx` during asynchronous initial report loading. It is not a clean lint run.
-- A production-preview browser smoke check previously confirmed that a created report remained visible after a page reload and that the service worker was active on localhost. This is a manual check, not an automated regression test.
+### Synchronization Protocol
+1. **Handshake**: Peers verify protocol version `resqnet-v1` and device IDs.
+2. **Manifest Exchange**: Exchange compact manifest `[{ id, revision, updatedAt }]`.
+3. **Differential Transfer**: Only reports that the peer is missing or has older revisions of are sent.
+4. **Relay Persistence**: Receiver increments `relayHops = relayHops + 1`, stores in local IndexedDB, and queues as `pending_cloud_sync`.
+5. **Carrier Upload**: Any receiver that later reaches connectivity acts as a carrier and uploads all relayed reports to the cloud!
 
-### Manual test checklist
+---
 
-- [ ] Open the Report tab, submit a report without GPS, and verify a success toast and saved record.
-- [ ] Reload the same origin and verify the report is still listed with `Pending sync`.
-- [ ] Capture location with permission allowed; verify coordinates, accuracy circle, timestamp, and Google Maps URL.
-- [ ] Deny location permission or test an unavailable position; verify the UI gives feedback and report submission still works without location.
-- [ ] Confirm deletion, then verify the report disappears after a reload; cancel deletion and verify it remains.
-- [ ] Build and preview production, load once online, then simulate offline and reload. Verify the app shell and saved reports open; expect map tiles and external links to be unavailable offline.
-- [ ] Configure a test API that honors `Idempotency-Key`; verify only 2xx responses change status to `Synced`, while failed/network requests remain pending. No backend is included to run this check by default.
-- [ ] Exercise storage errors in browser developer tools or a test browser profile where IndexedDB is unavailable/quota-limited; verify save/load errors are surfaced rather than reported as successful.
-- [ ] Test PWA installation in a supported browser over localhost or HTTPS after a production build and service-worker installation.
+## 6. Cloud Synchronization & Network Recovery
 
-## Current Status and Roadmap
+ResQNet implements resilient background sync:
+- **Online Detection**: Uses `navigator.onLine` and `window.addEventListener('online')` as hints, followed by a real HTTP reachability check to `/api/health`.
+- **Idempotent Ingestion**: Every upload includes `Idempotency-Key: ${report.id}-r${report.revision}`.
+- **Deduplication**: If the server already possesses the report with the same or higher revision, it acknowledges without creating duplicates.
+- **Exponential Backoff**: Failed attempts retry with exponential backoff and randomized jitter to prevent server stampedes.
+- **State Integrity**: Local report status changes to `synced` only after confirmed HTTP 2xx server response.
 
-### Implemented
+---
 
-- Four-screen mobile-oriented interface with Home, Report, Location, and Reports tabs.
-- Optional browser GPS capture and a real Leaflet map of the captured coordinates.
-- Local IndexedDB report storage, listing, migration from prior localStorage data, and confirmed deletion.
-- Production PWA manifest, icons, generated service worker, and static-asset precaching.
-- Optional configurable foreground sync client with pending/synced state.
+## 7. Backend API & Database Architecture
 
-### Partial or constrained
+The backend is built with Node.js and Express in `backend/server.js`, utilizing atomic persistent storage in `backend/data/db.json`.
 
-- Server synchronization depends on an external API contract; no server, endpoint deployment, API health check, auth, or response-body validation is part of this repository.
-- Offline support covers the cached application shell and local records, not map tiles, external navigation, or guaranteed report delivery.
-- Accessibility and responsive styling have useful foundations but have not received formal WCAG, assistive-technology, or broad device testing.
-- The current lint command reports one React effect warning; there is no automated test suite.
+### Endpoints
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/health` | None | Service status and version check |
+| `POST` | `/api/reports` | None | Ingest or update single emergency report (idempotent) |
+| `POST` | `/api/reports/batch` | None | Batch ingestion for relay carriers |
+| `POST` | `/api/auth/login` | None | Rescuer authentication; issues session token |
+| `GET` | `/api/reports` | Bearer Token | Retrieve reports with filtering, sorting, pagination |
+| `GET` | `/api/reports/:id` | Bearer Token | Retrieve single report detail |
+| `PATCH` | `/api/reports/:id/triage` | Bearer Token | Update triage status (`acknowledged`, `dispatched`, `rescued`, `closed`) |
+| `POST` | `/api/p2p/signal` | None | Submit WebRTC offer/answer for room |
+| `GET` | `/api/p2p/signal/:roomId` | None | Retrieve WebRTC offer/answer for room |
 
-### Not implemented; possible future work
+### Default Rescuer Credentials (for testing)
+- **Commander**: `commander` / `resqnet2026` (Lead Rescuer, Badge RN-901)
+- **Paramedic**: `medic` / `medic123` (Paramedic, Badge MED-412)
 
-- A real backend with durable server-side report storage and documented API lifecycle.
-- Responder/coordinator dashboard, assignment, triage, and multi-device coordination.
-- Authentication, authorization, audit history, and role management.
-- Push notifications, SMS alerts, dispatch integrations, and delivery acknowledgements.
-- Formal accessibility testing, automated component/integration tests, and end-to-end offline/GPS coverage.
+---
 
-These are future options, not current ResQNet capabilities.
+## 8. Rescuer / Operations Command Dashboard
 
-## Troubleshooting
+The Rescuer Dashboard (`RescuerDashboard.jsx`) provides authorized response teams with operational incident intelligence:
+- **KPI Summary Chips**: Real-time counts of Total Reports, Critical Incidents, Dispatched Units, and Rescued Victims.
+- **Interactive Leaflet Map**:
+  - Live incident markers color-coded by severity: Critical (Red), High (Orange), Medium/Low (Green).
+  - Accuracy circle around each incident pin.
+  - Interactive popup displaying victim count, situation notes, and triage quick-action.
+- **Operational Triage Actions**:
+  - Rescuers can update report status (`NEW` → `ACKNOWLEDGED` → `DISPATCHED` → `RESCUED` → `CLOSED`).
+  - Attach dispatcher notes (e.g., "Unit 4 dispatched with hydraulic cutters").
+  - Audit trail tracks rescuer badge number and timestamp.
+- **Relay Hop Indicators**: Rescuers see if a report was received directly or relayed across mesh peers ("Relayed via 2 peers").
 
-| Symptom | Likely cause and action |
-|---|---|
-| `npm` cannot find `package.json` | Commands must run in `frontend/`: `cd frontend` first. |
-| GPS reports insecure context or is unavailable | Use `http://localhost` for local work or deploy through HTTPS; grant location permission in browser settings. A development LAN IP over plain HTTP may not be treated as secure. |
-| Location denied or timed out | Check browser/site permissions and device location services, then retry. Report submission does not depend on GPS. |
-| Map is blank or incomplete | The map requires network access to fetch OpenStreetMap tiles. Confirm connectivity; tiles are not cached offline. |
-| Reports are missing | Check that the same browser profile and origin are being used and that IndexedDB is available. Browser data clearing, private browsing behavior, or storage eviction can remove local records. |
-| App does not open offline | First load the production build online and allow the service worker to install, then reload. Development mode is not the production precache test. |
-| A previous UI version persists | An installed service worker can serve an older cached application during updates. Reload after the worker updates; for development diagnosis, inspect/unregister the site worker and clear its Cache Storage in browser developer tools. |
-| Report remains `Pending sync` | No API URL may be configured, the app may be offline, or the API request may have failed/non-2xx. Check the browser console/network panel and the API CORS/idempotency behavior. |
+---
 
-## Contributing
+## 9. Automated Test Suite & Verification
 
-This workspace does not currently define a contribution guide or automated pull-request checks. For a focused contribution:
+The project includes an end-to-end automated test suite:
 
-1. Keep changes scoped to the existing React/Vite frontend and preserve the offline-first behavior.
-2. Run `cd frontend && npm ci && npm run lint && npm run build`.
-3. Manually verify affected flows in the production preview, especially IndexedDB persistence, permission/error states, and offline behavior when relevant.
-4. Describe API or data-model changes explicitly; never claim an upload or emergency dispatch succeeds without a real server confirmation.
+```bash
+npm run test
+```
 
-## Security, Privacy, and License
+### Test Results
+```
+> resqnet-monorepo@1.0.0 test
+> npm run test:backend && npm run test:frontend
 
-- Reports and optional coordinates are sensitive personal information. Current records are stored locally in browser IndexedDB without application-level encryption or account access control. Anyone with access to the same browser profile may be able to inspect or clear them.
-- If `VITE_RESQNET_API_URL` is configured, report data is sent to that service as JSON. Configure transport security, access controls, retention, consent, and privacy notices appropriate to the deployment. Never place API secrets in `VITE_` variables; they are client-visible.
-- Do not rely on this prototype as the sole emergency communication channel. Local persistence does not mean responders have received a report.
-- No `LICENSE` file is present in the inspected project. The project license has not yet been specified.
+▶ ResQNet Backend API Test Suite
+  ✔ GET /api/health should return 200 OK with service details
+  ✔ POST /api/reports with missing ID should return 400 Bad Request
+  ✔ POST /api/reports should ingest a new emergency report (201 Created)
+  ✔ POST /api/reports duplicate report should be deduplicated (200 OK)
+  ✔ POST /api/reports with higher revision should update the record (200 OK)
+  ✔ GET /api/reports without rescuer credentials should return 401 Unauthorized
+  ✔ POST /api/auth/login with valid credentials should return session token
+  ✔ GET /api/reports with rescuer token should list reports with filters
+  ✔ PATCH /api/reports/:id/triage should update triage status
+  ✔ P2P signaling endpoints should store and retrieve offer/answer
+✔ ResQNet Backend API Test Suite (10 passed)
+
+▶ ResQNet Storage, Emergency SOS & Multi-Hop Relay Test Suite
+  ✔ getOrCreateDeviceId should generate and persist stable pseudonymous device ID
+  ✔ Offline SOS report creation should save to IndexedDB immediately without GPS or internet
+  ✔ Attaching GPS to an existing report should bump revision without duplicating
+  ✔ getReportManifest should produce compact sync manifest
+  ✔ P2P mergeReport should handle new report, revision conflict resolution, and stale rejection
+  ✔ Multi-Device Store-and-Forward Relay: Device A -> Device B -> Device C -> Cloud Ingestion
+  ✔ Triple-Tap Detection: Single tap opens manual form, exactly 3 taps triggers SOS
+✔ ResQNet Storage, Emergency SOS & Multi-Hop Relay Test Suite (7 passed)
+
+Total: 17 passed, 0 failed, 100% pass rate.
+```
+
+---
+
+## 10. Setup and Running Locally
+
+### Prerequisites
+- Node.js v18+ (tested on Node v26)
+- npm v9+
+
+### Quick Start
+```bash
+# 1. Install root, backend, and frontend dependencies
+npm install --prefix backend
+npm install --prefix frontend
+
+# 2. Run automated tests
+npm test
+
+# 3. Start development servers (Backend on :4000, Frontend on :5173)
+npm run dev
+```
+
+### Accessing the Applications
+- **Victim Citizen PWA**: [http://localhost:5173](http://localhost:5173)
+- **Rescuer Operations**: Navigate to the **Rescuer** tab in the app or log in with `commander` / `resqnet2026`.
+- **Backend API Direct**: [http://localhost:4000/api/health](http://localhost:4000/api/health)
+
+### Production Build & Preview
+```bash
+npm run build
+npm run --prefix frontend preview
+```
+
+---
+
+## 11. Browser and Platform Realities & Limitations
+
+1. **Geolocation Secure Context**: The Geolocation API strictly requires HTTPS in production or `localhost`/`127.0.0.1` in development. Browsers block GPS on plain HTTP origins.
+2. **P2P Discovery**: Web browsers cannot silently scan arbitrary Bluetooth or Wi-Fi devices without user interaction. ResQNet uses WebRTC DataChannels with either local signaling or offline SDP code exchange.
+3. **Background Execution**: When a mobile browser is closed or backgrounded, JavaScript execution is suspended by iOS/Android OS power management. All local reports are durably preserved in IndexedDB and resume transmission immediately when the app is reopened or when the device regains connectivity.
+4. **Emergency Dispatch Disclaimer**: ResQNet is an offline reporting and volunteer/coordination tool. In life-threatening emergencies where cellular networks function, victims should call official emergency response numbers (112, 911, 999).

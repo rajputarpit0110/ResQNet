@@ -1,4 +1,3 @@
-
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
@@ -40,4 +39,24 @@ export default defineConfig({
       },
     }),
   ],
+  server: {
+    proxy: {
+      "/api": {
+        target: "http://localhost:4000",
+        changeOrigin: true,
+      },
+      "/reports": {
+        target: "http://localhost:4000",
+        changeOrigin: true,
+      },
+      "/health": {
+        target: "http://localhost:4000",
+        changeOrigin: true,
+      },
+      "/p2p": {
+        target: "http://localhost:4000",
+        changeOrigin: true,
+      },
+    },
+  },
 });
