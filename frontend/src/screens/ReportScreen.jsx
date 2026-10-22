@@ -1,14 +1,14 @@
 import { useState, useRef } from "react";
 
 const CATEGORIES = [
-  "Medical",
-  "Trapped",
-  "Fire",
-  "Flood",
-  "Structural Collapse",
-  "Missing Person",
-  "Injured",
-  "Other",
+  { id: "Medical", label: "Medical", icon: "🩺" },
+  { id: "Trapped", label: "Trapped", icon: "⚠️" },
+  { id: "Fire", label: "Fire", icon: "🔥" },
+  { id: "Flood", label: "Flood", icon: "🌊" },
+  { id: "Structural Collapse", label: "Collapse", icon: "🏚️" },
+  { id: "Missing Person", label: "Missing", icon: "🔍" },
+  { id: "Injured", label: "Injured", icon: "🩹" },
+  { id: "Other", label: "Other", icon: "❓" },
 ];
 
 const SEVERITIES = ["Critical", "High", "Medium", "Low"];
@@ -143,14 +143,15 @@ export default function ReportScreen({ onSubmit, isSubmitting, initialReport = n
         <div className="choice-grid">
           {CATEGORIES.map((item) => (
             <button
-              key={item}
+              key={item.id}
               type="button"
               disabled={isSubmitting}
-              aria-pressed={type === item}
-              className={`choice ${type === item ? "selected" : ""}`}
-              onClick={() => setType(item)}
+              aria-pressed={type === item.id}
+              className={`choice cat-choice ${type === item.id ? "selected" : ""}`}
+              onClick={() => setType(item.id)}
             >
-              {item}
+              <span className="cat-icon">{item.icon}</span>
+              <span className="cat-label">{item.label}</span>
             </button>
           ))}
         </div>
@@ -182,8 +183,7 @@ export default function ReportScreen({ onSubmit, isSubmitting, initialReport = n
         >
           {["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"].map((n) => (
             <option key={n} value={n}>
-              {n}
-              {n === "10" ? "+" : ""} people
+              {n} {n === "1" ? "person" : "people"}{n === "10" ? "+" : ""}
             </option>
           ))}
         </select>

@@ -235,6 +235,7 @@ export default function App() {
             location={location}
             activeEmergency={activeEmergency}
             onAddDetails={handleAddDetails}
+            onClearEmergency={() => setActiveEmergency(null)}
           />
         )}
 
