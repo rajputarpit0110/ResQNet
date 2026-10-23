@@ -18,6 +18,14 @@ function readData() {
         reports: [],
         rescuers: [
           {
+            id: "rescuer-default",
+            username: "rescuer",
+            passwordHash: "resqnet2026", // Universal default rescuer
+            name: "Authorized Rescuer",
+            role: "lead_rescuer",
+            badgeNumber: "RN-100",
+          },
+          {
             id: "rescuer-1",
             username: "commander",
             passwordHash: "resqnet2026", // Default demo credentials
@@ -222,6 +230,28 @@ export const db = {
   getRescuerByUsername(username) {
     const data = readData();
     return data.rescuers.find((r) => r.username.toLowerCase() === username.toLowerCase()) || null;
+  },
+
+  createRescuer({ username, passwordHash, name, role }) {
+    const data = readData();
+    const cleanUsername = String(username).trim();
+    const cleanName = name || cleanUsername.charAt(0).toUpperCase() + cleanUsername.slice(1);
+    const badgeNumber = `RN-${Math.floor(100 + Math.random() * 900)}`;
+
+    const newRescuer = {
+      id: `rescuer-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      username: cleanUsername,
+      passwordHash: passwordHash || "resqnet2026",
+      name: cleanName.toLowerCase().includes("rescuer") ? cleanName : `Rescuer ${cleanName}`,
+      role: role || "field_rescuer",
+      badgeNumber,
+      createdAt: new Date().toISOString(),
+    };
+
+    data.rescuers = data.rescuers || [];
+    data.rescuers.push(newRescuer);
+    writeData(data);
+    return newRescuer;
   },
 
   // In-memory P2P signaling helper

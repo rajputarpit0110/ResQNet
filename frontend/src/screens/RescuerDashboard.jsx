@@ -14,7 +14,7 @@ export default function RescuerDashboard() {
   });
 
   // Login form state
-  const [username, setUsername] = useState("commander");
+  const [username, setUsername] = useState("rescuer");
   const [password, setPassword] = useState("resqnet2026");
   const [loginError, setLoginError] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -187,7 +187,7 @@ export default function RescuerDashboard() {
           </button>
 
           <p className="form-disclaimer">
-            Default credentials for testing: commander / resqnet2026 or medic / medic123
+            Default credentials: <strong>rescuer / resqnet2026</strong>. You can also enter ANY custom username with <strong>resqnet2026</strong> to auto-join as a new rescuer!
           </p>
         </form>
       </div>
