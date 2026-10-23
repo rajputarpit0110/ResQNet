@@ -219,4 +219,28 @@ describe("ResQNet Backend API Test Suite", () => {
     const offerData = await getOffer.json();
     assert.strictEqual(offerData.sdp, "v=0\r\ntest-sdp-offer");
   });
+
+  test("P2P beacon and nearby peers discovery should register and list active devices", async () => {
+    // 1. Post beacon from Device Alpha
+    const postBeacon = await fetch(`${baseUrl}/api/p2p/beacon`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        deviceId: "dev-alpha-123",
+        name: "Victim Rahul",
+        pendingCount: 2,
+      }),
+    });
+    assert.strictEqual(postBeacon.status, 200);
+
+    // 2. Fetch nearby peers from Device Beta
+    const getPeers = await fetch(`${baseUrl}/api/p2p/peers?excludeId=dev-beta-456`);
+    assert.strictEqual(getPeers.status, 200);
+    const peersData = await getPeers.json();
+    assert.ok(Array.isArray(peersData.peers));
+    const alpha = peersData.peers.find((p) => p.deviceId === "dev-alpha-123");
+    assert.ok(alpha);
+    assert.strictEqual(alpha.name, "Victim Rahul");
+    assert.strictEqual(alpha.pendingCount, 2);
+  });
 });

@@ -223,6 +223,22 @@ app.get(["/p2p/signal/:roomId", "/api/p2p/signal/:roomId"], (req, res) => {
   res.status(200).json(signal);
 });
 
+// --- Autonomous Proximity Beacon & Peer Discovery ---
+app.post(["/p2p/beacon", "/api/p2p/beacon"], (req, res) => {
+  const { deviceId, name, pendingCount } = req.body || {};
+  if (!deviceId) {
+    return res.status(400).json({ error: "deviceId required" });
+  }
+  db.registerBeacon({ deviceId, name, pendingCount });
+  res.status(200).json({ success: true });
+});
+
+app.get(["/p2p/peers", "/api/p2p/peers"], (req, res) => {
+  const { excludeId } = req.query;
+  const peers = db.getNearbyPeers(excludeId);
+  res.status(200).json({ peers });
+});
+
 // Serve frontend static assets in production if built
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));

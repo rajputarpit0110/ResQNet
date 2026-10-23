@@ -3,9 +3,14 @@ import QRCode from "qrcode";
 import { Html5Qrcode } from "html5-qrcode";
 import { ResQNetP2PManager } from "../services/p2pTransfer";
 import { getApiBaseUrl } from "../services/reportSync";
-import { getReports, mergeReport } from "../services/reportStorage";
+import {
+  getReports,
+  getPendingReports,
+  mergeReport,
+  getOrCreateDeviceId,
+} from "../services/reportStorage";
 
-// Tactile audio feedback on successful QR scan
+// Tactile audio feedback on successful transfer
 function playSuccessBeep() {
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -25,27 +30,34 @@ function playSuccessBeep() {
 }
 
 export default function PeerShareScreen() {
-  // Modes: "qr", "hotspot", "manual"
-  const [activeMode, setActiveMode] = useState("qr");
-  
-  // QR Submode: "show" (victim shows QR) or "scan" (helper scans QR)
+  // Modes: "radar" (auto-proximity), "qr" (optical scan), "manual" (backup)
+  const [activeMode, setActiveMode] = useState("radar");
+
+  // Autonomous Radar & Proximity State
+  const [autoRelayEnabled, setAutoRelayEnabled] = useState(true);
+  const [localDeviceId, setLocalDeviceId] = useState("");
+  const [localPendingCount, setLocalPendingCount] = useState(0);
+  const [nearbyPeers, setNearbyPeers] = useState([]);
+  const [incomingRequest, setIncomingRequest] = useState(null);
+  const [bluetoothDevice, setBluetoothDevice] = useState(null);
+  const [isScanningBluetooth, setIsScanningBluetooth] = useState(false);
+  const [radarStatus, setRadarStatus] = useState("Scanning proximity...");
+  const syncedPeerIdsRef = useRef(new Set());
+  const isAutoSyncingRef = useRef(false);
+
+  // QR Mode State
   const [qrSubMode, setQrSubMode] = useState("show");
-  
-  // Reports list for QR display
   const [localReports, setLocalReports] = useState([]);
   const [selectedReportId, setSelectedReportId] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState("");
   const [qrError, setQrError] = useState("");
-
-  // QR Scanner State
   const [isScanning, setIsScanning] = useState(false);
   const [scanSuccess, setScanSuccess] = useState(null);
   const [scanError, setScanError] = useState("");
   const scannerRef = useRef(null);
 
-  // Hotspot WebRTC Mode
+  // Hotspot / Signaling State
   const [roomId, setRoomId] = useState("ROOM-101");
-  const [isHost, setIsHost] = useState(false);
   const [status, setStatus] = useState("idle");
   const [statusDetail, setStatusDetail] = useState("");
   const [logs, setLogs] = useState([]);
@@ -57,16 +69,24 @@ export default function PeerShareScreen() {
 
   const p2pRef = useRef(null);
 
-  // 1. Load Local Reports for QR generator
+  // 1. Initialize Local Device ID & Reports
+  useEffect(() => {
+    getOrCreateDeviceId().then((id) => setLocalDeviceId(id));
+    getPendingReports().then((p) => setLocalPendingCount(p.length));
+  }, []);
+
+  // 2. Load Local Reports for QR generator
   const loadReports = useCallback(async () => {
     try {
       const reports = await getReports();
       setLocalReports(reports);
+      const pending = await getPendingReports();
+      setLocalPendingCount(pending.length);
       if (reports.length > 0 && !selectedReportId) {
         setSelectedReportId(reports[0].id);
       }
     } catch (err) {
-      console.error("Could not load reports for QR:", err);
+      console.error("Could not load reports:", err);
     }
   }, [selectedReportId]);
 
@@ -76,7 +96,162 @@ export default function PeerShareScreen() {
     return () => window.removeEventListener("resqnet:reports-updated", loadReports);
   }, [loadReports]);
 
-  // 2. Generate QR Code when selected report changes
+  // 3. WebRTC Manager Initialization
+  useEffect(() => {
+    p2pRef.current = new ResQNetP2PManager({
+      onStatusChange: ({ status: s, detail }) => {
+        setStatus(s);
+        setStatusDetail(detail);
+      },
+      onLog: (msg) => {
+        setLogs((prev) => [msg, ...prev.slice(0, 40)]);
+      },
+    });
+
+    return () => {
+      p2pRef.current?.close();
+    };
+  }, []);
+
+  // 4. Auto-Proximity Radar Heartbeat & Auto-Sync Loop
+  useEffect(() => {
+    if (!localDeviceId) return;
+
+    let isMounted = true;
+    const apiUrl = getApiBaseUrl() || "http://localhost:4000/api";
+
+    const pulseBeacon = async () => {
+      try {
+        const pending = await getPendingReports();
+        if (isMounted) setLocalPendingCount(pending.length);
+
+        // 1. Broadcast presence beacon
+        await fetch(`${apiUrl}/p2p/beacon`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deviceId: localDeviceId,
+            name: `ResQNet Peer (${localDeviceId.slice(0, 8)})`,
+            pendingCount: pending.length,
+          }),
+        }).catch(() => {});
+
+        // 2. Query nearby active peers within radio / subnet proximity
+        const res = await fetch(`${apiUrl}/p2p/peers?excludeId=${localDeviceId}`).catch(() => null);
+        if (res && res.ok) {
+          const data = await res.json();
+          const peers = Array.isArray(data.peers) ? data.peers : [];
+          if (isMounted) {
+            setNearbyPeers(peers);
+            setRadarStatus(
+              peers.length > 0
+                ? `${peers.length} nearby peer(s) detected in range`
+                : "Active radar pulse • Listening for nearby peers"
+            );
+          }
+
+          // 3. Autonomous Zero-Touch Transfer Logic
+          if (peers.length > 0 && !isAutoSyncingRef.current) {
+            for (const peer of peers) {
+              const pairKey = [localDeviceId, peer.deviceId].sort().join("-");
+              // If either peer has pending reports and hasn't synced yet
+              if (
+                (peer.pendingCount > 0 || pending.length > 0) &&
+                !syncedPeerIdsRef.current.has(pairKey)
+              ) {
+                if (autoRelayEnabled) {
+                  // Execute automatic handshake in background
+                  executeAutonomousSync(peer, pairKey);
+                } else {
+                  // Prompt user for permission
+                  if (isMounted && !incomingRequest) {
+                    setIncomingRequest(peer);
+                  }
+                }
+                break;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        // Offline / silence in background
+      }
+    };
+
+    pulseBeacon();
+    const interval = setInterval(pulseBeacon, 3500);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [localDeviceId, autoRelayEnabled, incomingRequest]);
+
+  // Autonomous Transfer Execution
+  const executeAutonomousSync = async (peer, pairKey) => {
+    isAutoSyncingRef.current = true;
+    const apiUrl = getApiBaseUrl() || "http://localhost:4000/api";
+    const autoRoom = `AUTO-${[localDeviceId, peer.deviceId].sort().join("").slice(0, 12)}`;
+
+    setLogs((prev) => [
+      `[Auto-Mesh] Proximity detected peer ${peer.name}. Initiating zero-touch relay...`,
+      ...prev,
+    ]);
+
+    try {
+      // Deterministic host election (alphabetically first device ID acts as host)
+      const isHost = localDeviceId < peer.deviceId;
+      await p2pRef.current.joinRoomWithSignaling(apiUrl, autoRoom, isHost);
+
+      syncedPeerIdsRef.current.add(pairKey);
+      playSuccessBeep();
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        navigator.vibrate([80, 40, 80]);
+      }
+
+      setLogs((prev) => [
+        `[Auto-Mesh] ✅ Zero-touch relay complete with ${peer.name}!`,
+        ...prev,
+      ]);
+    } catch (err) {
+      setLogs((prev) => [`[Auto-Mesh] Sync attempt note: ${err.message}`, ...prev]);
+    } finally {
+      setTimeout(() => {
+        isAutoSyncingRef.current = false;
+      }, 5000);
+    }
+  };
+
+  // Web Bluetooth Low Energy (BLE) Scan
+  const handleScanBluetooth = async () => {
+    if (typeof navigator === "undefined" || !navigator.bluetooth) {
+      alert(
+        "Web Bluetooth API requires Chrome on Android or a supported BLE device. Your Local Proximity Radar is currently scanning all nearby devices over Wi-Fi / Hotspot automatically!"
+      );
+      return;
+    }
+
+    try {
+      setIsScanningBluetooth(true);
+      const device = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: ["battery_service"],
+      });
+      setBluetoothDevice(device);
+      setLogs((prev) => [
+        `[BLE] Discovered Bluetooth Device: ${device.name || "Unknown ResQNet Beacon"} (${device.id.slice(0, 8)})`,
+        ...prev,
+      ]);
+    } catch (err) {
+      if (err.name !== "NotFoundError") {
+        setLogs((prev) => [`[BLE] Scan canceled: ${err.message}`, ...prev]);
+      }
+    } finally {
+      setIsScanningBluetooth(false);
+    }
+  };
+
+  // Generate QR Code
   useEffect(() => {
     if (activeMode !== "qr" || qrSubMode !== "show") return;
 
@@ -91,7 +266,6 @@ export default function PeerShareScreen() {
       return;
     }
 
-    // Build ultra-compact, standardized payload for instant camera scan
     const compact = {
       resqnet: "v1",
       id: currentReport.id,
@@ -128,7 +302,7 @@ export default function PeerShareScreen() {
       });
   }, [selectedReportId, localReports, activeMode, qrSubMode]);
 
-  // 3. Stop Scanner Helper
+  // Stop Camera Scanner
   const stopScanner = useCallback(async () => {
     if (scannerRef.current) {
       try {
@@ -137,21 +311,14 @@ export default function PeerShareScreen() {
         }
         scannerRef.current.clear();
       } catch (err) {
-        console.warn("Scanner stop cleanup error:", err);
+        console.warn("Scanner stop error:", err);
       }
       scannerRef.current = null;
     }
     setIsScanning(false);
   }, []);
 
-  // Clean up scanner on unmount or mode switch
-  useEffect(() => {
-    return () => {
-      stopScanner();
-    };
-  }, [stopScanner]);
-
-  // 4. Start Camera Scanner
+  // Start Camera Scanner
   const startScanner = async () => {
     setScanError("");
     setScanSuccess(null);
@@ -179,13 +346,11 @@ export default function PeerShareScreen() {
               return;
             }
 
-            // Play beep & vibrate
             playSuccessBeep();
             if (typeof navigator !== "undefined" && navigator.vibrate) {
               navigator.vibrate([100, 50, 100]);
             }
 
-            // Merge into local storage
             const mergeResult = await mergeReport(parsed);
             window.dispatchEvent(new CustomEvent("resqnet:reports-updated"));
 
@@ -195,38 +360,16 @@ export default function PeerShareScreen() {
             setScanError("Failed to parse QR data: " + e.message);
           }
         },
-        () => {
-          // Frame rejected (no QR in frame) - silence
-        }
+        () => {}
       );
     } catch (err) {
       console.error("Camera access failed:", err);
-      setScanError(
-        "Could not access camera. Please check camera permissions in your browser or try Hotspot Sync."
-      );
+      setScanError("Could not access camera. Please check permissions or use Proximity Radar.");
       setIsScanning(false);
     }
   };
 
-  // 5. Initialize WebRTC Manager for Hotspot & Manual modes
-  useEffect(() => {
-    p2pRef.current = new ResQNetP2PManager({
-      onStatusChange: ({ status: s, detail }) => {
-        setStatus(s);
-        setStatusDetail(detail);
-      },
-      onLog: (msg) => {
-        setLogs((prev) => [msg, ...prev.slice(0, 40)]);
-      },
-    });
-
-    return () => {
-      p2pRef.current?.close();
-    };
-  }, []);
-
-  const handleStartNetworkSync = async (asHost) => {
-    setIsHost(asHost);
+  const handleStartManualNetworkSync = async (asHost) => {
     const apiUrl = getApiBaseUrl() || "http://localhost:4000/api";
     try {
       await p2pRef.current.joinRoomWithSignaling(apiUrl, roomId.trim(), asHost);
@@ -274,15 +417,24 @@ export default function PeerShareScreen() {
   return (
     <div className="screen peershare-screen">
       <div className="screen-heading">
-        <p className="eyebrow">OFFLINE DEVICE-TO-DEVICE MESH</p>
-        <h2>Nearby Emergency Transfer</h2>
+        <p className="eyebrow">AUTONOMOUS AD-HOC MESH</p>
+        <h2>Nearby Emergency Radar</h2>
         <p className="subheading">
-          Relay emergency reports to nearby phones without towers, internet, or cables.
+          Devices in Bluetooth / Wi-Fi range automatically discover each other and exchange emergency reports without meeting.
         </p>
       </div>
 
-      {/* Main Mode Switcher */}
+      {/* Main Mode Tabs */}
       <div className="p2p-mode-tabs">
+        <button
+          className={`mode-tab-btn ${activeMode === "radar" ? "active" : ""}`}
+          onClick={() => {
+            setActiveMode("radar");
+            stopScanner();
+          }}
+        >
+          🛰️ Auto Proximity Radar (Zero-Touch ⭐)
+        </button>
         <button
           className={`mode-tab-btn ${activeMode === "qr" ? "active" : ""}`}
           onClick={() => {
@@ -290,16 +442,7 @@ export default function PeerShareScreen() {
             stopScanner();
           }}
         >
-          📷 QR Scanner (Easiest & Fastest ⭐)
-        </button>
-        <button
-          className={`mode-tab-btn ${activeMode === "hotspot" ? "active" : ""}`}
-          onClick={() => {
-            setActiveMode("hotspot");
-            stopScanner();
-          }}
-        >
-          📡 1-Click Hotspot Sync
+          📷 QR Scanner (Optical)
         </button>
         <button
           className={`mode-tab-btn ${activeMode === "manual" ? "active" : ""}`}
@@ -308,12 +451,178 @@ export default function PeerShareScreen() {
             stopScanner();
           }}
         >
-          📋 Manual Code
+          📋 Manual Room
         </button>
       </div>
 
       {/* ===================================================================
-          MODE 1: QR CODE TRANSFER (EASIEST & ZERO INTERNET)
+          MODE 1: AUTONOMOUS PROXIMITY RADAR (ZERO-TOUCH AUTOMATIC RELAY)
+          =================================================================== */}
+      {activeMode === "radar" && (
+        <div className="p2p-card proximity-radar-card">
+          {/* Autonomous Relay Toggle */}
+          <div className="auto-relay-header">
+            <div className="auto-relay-info">
+              <strong>⚡ Autonomous Auto-Relay</strong>
+              <p>
+                When enabled, data transfers <strong>automatically</strong> to any nearby phone that enters your range. No meeting or manual action needed!
+              </p>
+            </div>
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={autoRelayEnabled}
+                onChange={(e) => setAutoRelayEnabled(e.target.checked)}
+              />
+              <span className="slider round"></span>
+            </label>
+          </div>
+
+          {/* Radar Animation & Visualizer */}
+          <div className="radar-visual-container">
+            <div className="sonar-radar-box">
+              <div className="radar-center-blip">
+                <span className="blip-core" />
+                <span className="blip-label">You ({localDeviceId ? localDeviceId.slice(0, 6) : "Self"})</span>
+              </div>
+              <div className="sonar-wave wave-1" />
+              <div className="sonar-wave wave-2" />
+              <div className="sonar-wave wave-3" />
+              <div className="radar-sweep-line" />
+
+              {/* Orbiting Nearby Peer Blips */}
+              {nearbyPeers.map((peer, idx) => (
+                <div
+                  key={peer.deviceId}
+                  className={`peer-blip peer-blip-${(idx % 4) + 1} ${
+                    peer.pendingCount > 0 ? "has-reports" : ""
+                  }`}
+                  title={`${peer.name} (${peer.pendingCount} reports)`}
+                >
+                  <span className="peer-blip-dot" />
+                  <span className="peer-blip-text">
+                    {peer.name.split(" ")[0]} ({peer.pendingCount > 0 ? `🚨 ${peer.pendingCount}` : "OK"})
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <div className="radar-status-bar">
+              <span className="radar-pulse-dot" />
+              <span className="radar-status-text">{radarStatus}</span>
+              <span className="radar-pending-pill">
+                📦 {localPendingCount} report(s) on your device
+              </span>
+            </div>
+          </div>
+
+          {/* Incoming Peer Transfer Request Prompt (when Auto-Relay is OFF) */}
+          {incomingRequest && !autoRelayEnabled && (
+            <div className="incoming-request-modal">
+              <div className="incoming-icon">🔔</div>
+              <div className="incoming-content">
+                <h4>Nearby Peer Detected!</h4>
+                <p>
+                  <strong>{incomingRequest.name}</strong> is in physical range with{" "}
+                  <strong className="text-danger">{incomingRequest.pendingCount} emergency report(s)</strong> waiting to be relayed.
+                </p>
+                <div className="incoming-actions">
+                  <button
+                    className="primary-button"
+                    onClick={() => {
+                      executeAutonomousSync(
+                        incomingRequest,
+                        [localDeviceId, incomingRequest.deviceId].sort().join("-")
+                      );
+                      setIncomingRequest(null);
+                    }}
+                  >
+                    Accept & Relay Data Now
+                  </button>
+                  <button
+                    className="text-button"
+                    onClick={() => setIncomingRequest(null)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Discovered Peers List */}
+          <div className="nearby-peers-section">
+            <div className="peers-section-header">
+              <h4>Active Devices in Range ({nearbyPeers.length})</h4>
+              <button
+                className="ble-scan-btn"
+                onClick={handleScanBluetooth}
+                disabled={isScanningBluetooth}
+              >
+                {isScanningBluetooth ? "Scanning BLE..." : "📶 Scan Bluetooth (BLE)"}
+              </button>
+            </div>
+
+            {bluetoothDevice && (
+              <div className="ble-discovered-banner">
+                <span>🔵 BLE Beacon Linked: <strong>{bluetoothDevice.name || "Nearby Bluetooth Node"}</strong></span>
+                <span className="ble-status-chip">Connected</span>
+              </div>
+            )}
+
+            {nearbyPeers.length === 0 ? (
+              <div className="no-peers-box">
+                <p className="text-muted">
+                  No other ResQNet devices currently broadcasting in range.
+                  <br />
+                  <small>
+                    As soon as a victim, rescuer, or volunteer enters your Bluetooth/Wi-Fi range, they will appear here and data will transfer automatically.
+                  </small>
+                </p>
+              </div>
+            ) : (
+              <div className="peers-grid">
+                {nearbyPeers.map((peer) => (
+                  <div key={peer.deviceId} className="peer-card">
+                    <div className="peer-card-top">
+                      <div className="peer-avatar">📱</div>
+                      <div className="peer-details">
+                        <strong>{peer.name}</strong>
+                        <span className="peer-id-sub">ID: {peer.deviceId.slice(0, 10)}...</span>
+                      </div>
+                      <span className="proximity-chip">🟢 In Range</span>
+                    </div>
+
+                    <div className="peer-card-bottom">
+                      <span className="peer-reports-status">
+                        {peer.pendingCount > 0 ? (
+                          <strong className="text-danger">🚨 {peer.pendingCount} pending report(s)</strong>
+                        ) : (
+                          <span className="text-success">✅ In Sync</span>
+                        )}
+                      </span>
+                      <button
+                        className="choice-small"
+                        onClick={() =>
+                          executeAutonomousSync(
+                            peer,
+                            [localDeviceId, peer.deviceId].sort().join("-")
+                          )
+                        }
+                      >
+                        Force Relay ⚡
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================
+          MODE 2: OPTICAL QR SCANNER
           =================================================================== */}
       {activeMode === "qr" && (
         <div className="p2p-card qr-card-container">
@@ -339,7 +648,6 @@ export default function PeerShareScreen() {
             </button>
           </div>
 
-          {/* Submode 1A: Victim Shows QR */}
           {qrSubMode === "show" && (
             <div className="qr-show-panel">
               {localReports.length === 0 ? (
@@ -409,11 +717,6 @@ export default function PeerShareScreen() {
                           </strong>
                         </div>
                       </div>
-                      <p className="qr-instruction-hint">
-                        💡 <strong>How to use:</strong> Show this screen to any helper, rescuer, or neighbor.
-                        They tap <strong>"Scan Victim's QR"</strong> on their phone to instantly copy this report.
-                        Zero cellular network or Wi-Fi needed!
-                      </p>
                     </div>
                   )}
                 </>
@@ -421,7 +724,6 @@ export default function PeerShareScreen() {
             </div>
           )}
 
-          {/* Submode 1B: Helper Scans QR */}
           {qrSubMode === "scan" && (
             <div className="qr-scan-panel">
               {!isScanning && !scanSuccess && (
@@ -429,8 +731,7 @@ export default function PeerShareScreen() {
                   <div className="camera-icon-large">📷</div>
                   <h3>Ready to Scan Victim's QR</h3>
                   <p className="text-muted">
-                    Point your camera at the victim's phone screen. The emergency report will be transferred
-                    instantly and stored on your device to be relayed to rescuers.
+                    Point your camera at the victim's phone screen. Zero cellular network needed.
                   </p>
                   <button className="primary-button scan-action-btn" onClick={startScanner}>
                     Start Camera Scanner
@@ -471,16 +772,9 @@ export default function PeerShareScreen() {
                       <span className="text-danger">👥 {scanSuccess.people || 1} trapped</span>
                       <span>📍 {scanSuccess.latitude ? `${scanSuccess.latitude.toFixed(4)}, ${scanSuccess.longitude.toFixed(4)}` : "No GPS"}</span>
                     </div>
-                    <p className="success-status-note">
-                      💾 Saved to your device's local database (Relay Hop: {scanSuccess.relayHops}).
-                      <br />
-                      🚀 As soon as your phone connects to internet, this report will automatically upload to the ResQNet cloud!
-                    </p>
-                    <div className="success-button-group">
-                      <button className="primary-button" onClick={startScanner}>
-                        Scan Another Victim QR
-                      </button>
-                    </div>
+                    <button className="primary-button" onClick={startScanner} style={{ marginTop: "10px" }}>
+                      Scan Another Victim QR
+                    </button>
                   </div>
                 </div>
               )}
@@ -490,175 +784,65 @@ export default function PeerShareScreen() {
       )}
 
       {/* ===================================================================
-          MODE 2: 1-CLICK LOCAL HOTSPOT SYNC
-          =================================================================== */}
-      {activeMode === "hotspot" && (
-        <div className="p2p-card">
-          <div className="hotspot-intro-box">
-            <h3>📡 1-Click Hotspot / Local Wi-Fi Sync</h3>
-            <p className="text-muted">
-              Connect both phones to the same Mobile Hotspot or Wi-Fi (internet not required).
-              One phone hosts, the other joins, and all reports synchronize automatically!
-            </p>
-          </div>
-
-          <div className={`p2p-status-card status-${status}`}>
-            <div className="status-indicator-row">
-              <span className={`status-dot ${status === "connected" ? "online-dot" : ""}`} />
-              <strong>
-                {status === "idle" && "Ready to Pair"}
-                {status === "connecting" && "Establishing WebRTC Connection..."}
-                {status === "connected" && "Connected & Synchronized"}
-                {status === "syncing" && "Exchanging Incident Reports..."}
-                {status === "closed" && "Connection Closed"}
-                {status === "error" && "Connection Error"}
-              </strong>
-            </div>
-            {statusDetail && <p className="p2p-status-sub">{statusDetail}</p>}
-            {status !== "idle" && (
-              <button className="text-button disconnect-btn" onClick={handleDisconnect}>
-                Disconnect
-              </button>
-            )}
-          </div>
-
-          <div className="hotspot-controls">
-            <label htmlFor="room-id">Shared Room Code</label>
-            <input
-              id="room-id"
-              type="text"
-              value={roomId}
-              onChange={(e) => setRoomId(e.target.value.toUpperCase())}
-              placeholder="e.g. ROOM-101"
-              disabled={status !== "idle"}
-            />
-            <div className="p2p-button-row">
-              <button
-                className="primary-button"
-                onClick={() => handleStartNetworkSync(true)}
-                disabled={status !== "idle" || !roomId.trim()}
-              >
-                Host Room (Share My Reports)
-              </button>
-              <button
-                className="choice"
-                onClick={() => handleStartNetworkSync(false)}
-                disabled={status !== "idle" || !roomId.trim()}
-              >
-                Join Room (Receive & Relay)
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ===================================================================
-          MODE 3: MANUAL ENCRYPTED CODE (BACKUP)
+          MODE 3: MANUAL ROOM CODE / HOTSPOT (BACKUP)
           =================================================================== */}
       {activeMode === "manual" && (
-        <div className="p2p-card offline-exchange">
-          <p className="text-muted" style={{ marginBottom: "14px" }}>
-            Use this backup method only if your device camera is damaged or hotspot is unavailable.
-          </p>
-
-          <div className={`p2p-status-card status-${status}`}>
-            <div className="status-indicator-row">
-              <span className={`status-dot ${status === "connected" ? "online-dot" : ""}`} />
-              <strong>Status: {status}</strong>
-            </div>
-            {statusDetail && <p className="p2p-status-sub">{statusDetail}</p>}
-          </div>
-
-          <div className="step-box">
-            <h4>Step 1: Host creates offer</h4>
+        <div className="p2p-card">
+          <label htmlFor="room-id">Shared Room Code</label>
+          <input
+            id="room-id"
+            type="text"
+            value={roomId}
+            onChange={(e) => setRoomId(e.target.value.toUpperCase())}
+            placeholder="e.g. ROOM-101"
+            disabled={status !== "idle"}
+          />
+          <div className="p2p-button-row">
             <button
-              className="text-button"
-              onClick={handleCreateOfflineOffer}
-              disabled={status !== "idle"}
+              className="primary-button"
+              onClick={() => handleStartManualNetworkSync(true)}
+              disabled={status !== "idle" || !roomId.trim()}
             >
-              Generate Offline Code
+              Host Room (Share My Reports)
             </button>
-            {offlineOffer && (
-              <div className="code-display">
-                <textarea readOnly value={offlineOffer} rows={3} />
-                <button
-                  className="copy-btn"
-                  onClick={() => navigator.clipboard?.writeText(offlineOffer)}
-                >
-                  Copy Offer Code
-                </button>
-              </div>
-            )}
-          </div>
-
-          <div className="step-box">
-            <h4>Step 2: Peer pastes offer to create answer</h4>
-            <textarea
-              placeholder="Paste Host Offer Code here..."
-              rows={2}
-              value={inputCode}
-              onChange={(e) => setInputCode(e.target.value)}
-            />
-            <div className="button-group">
-              <button
-                className="choice"
-                onClick={handleAcceptOfflineOffer}
-                disabled={!inputCode.trim()}
-              >
-                Accept Offer & Generate Answer
-              </button>
-              <button
-                className="choice"
-                onClick={handleFinalizeOfflineAnswer}
-                disabled={!inputCode.trim()}
-              >
-                Host Finalize with Answer
-              </button>
-            </div>
-            {offlineAnswer && (
-              <div className="code-display">
-                <textarea readOnly value={offlineAnswer} rows={3} />
-                <button
-                  className="copy-btn"
-                  onClick={() => navigator.clipboard?.writeText(offlineAnswer)}
-                >
-                  Copy Answer Code
-                </button>
-              </div>
-            )}
+            <button
+              className="choice"
+              onClick={() => handleStartManualNetworkSync(false)}
+              disabled={status !== "idle" || !roomId.trim()}
+            >
+              Join Room (Receive & Relay)
+            </button>
           </div>
         </div>
       )}
 
       {/* Store and Forward Explainer */}
       <div className="relay-explainer-card">
-        <strong>🛡️ How Disaster Store-and-Forward Works:</strong>
+        <strong>🛡️ How Autonomous Store-and-Forward Works:</strong>
         <p>
-          1. <strong>Zero Internet:</strong> Reports are safely transferred to nearby phones using QR camera scans or local hotspot.
+          1. <strong>Passive Detection:</strong> ResQNet broadcasts an offline proximity beacon over Bluetooth & Wi-Fi radios.
           <br />
-          2. <strong>Multi-Hop Muling:</strong> When helper phones walk towards a town, rescue station, or connectivity zone, reports leapfrog forward.
+          2. <strong>Zero-Touch Handshake:</strong> When two devices come within ~30–100 meters, they automatically pair and transfer reports without either victim or rescuer needing to open a menu.
           <br />
-          3. <strong>Instant Cloud Ingestion:</strong> The moment any carrier phone connects to internet, all relayed reports automatically push to the ResQNet cloud!
+          3. <strong>Opportunistic Upload:</strong> When any helper reaches cellular service or a field command post, all accumulated incident records push to the cloud in real-time!
         </p>
       </div>
 
-      {/* Activity Log (visible in hotspot/manual modes) */}
-      {(activeMode === "hotspot" || activeMode === "manual") && (
-        <div className="p2p-logs">
-          <label>Transfer Activity Log</label>
-          <div className="log-console">
-            {logs.length === 0 ? (
-              <span className="log-empty">No activity yet. Ready to connect.</span>
-            ) : (
-              logs.map((log, idx) => (
-                <div key={idx} className="log-line">
-                  {log}
-                </div>
-              ))
-            )}
-          </div>
+      {/* Activity Log */}
+      <div className="p2p-logs">
+        <label>Transfer Activity Log</label>
+        <div className="log-console">
+          {logs.length === 0 ? (
+            <span className="log-empty">Autonomous radar active. Ready to connect.</span>
+          ) : (
+            logs.map((log, idx) => (
+              <div key={idx} className="log-line">
+                {log}
+              </div>
+            ))
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

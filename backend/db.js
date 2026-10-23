@@ -281,4 +281,34 @@ export const db = {
     if (!room || !room[type]) return null;
     return room[type];
   },
+
+  // Proximity Mesh Beaconing & Discovery
+  registerBeacon({ deviceId, name, pendingCount }) {
+    if (!global.resqnetBeacons) {
+      global.resqnetBeacons = new Map();
+    }
+    global.resqnetBeacons.set(deviceId, {
+      deviceId,
+      name: name || `Device ${deviceId.slice(0, 8)}`,
+      pendingCount: Number(pendingCount) || 0,
+      lastSeen: Date.now(),
+    });
+  },
+
+  getNearbyPeers(excludeDeviceId) {
+    if (!global.resqnetBeacons) {
+      global.resqnetBeacons = new Map();
+    }
+    const now = Date.now();
+    const peers = [];
+    for (const [id, beacon] of global.resqnetBeacons.entries()) {
+      if (now - beacon.lastSeen > 20000) {
+        global.resqnetBeacons.delete(id); // purge stale beacons after 20s
+      } else if (id !== excludeDeviceId) {
+        peers.push(beacon);
+      }
+    }
+    return peers;
+  },
 };
+
