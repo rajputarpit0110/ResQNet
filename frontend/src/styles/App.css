@@ -2653,37 +2653,136 @@ input:checked + .slider:before {
   border: 1px solid #059669;
 }
 
-/* Incoming Request Modal */
+/* Incoming Permission Request Card */
 .incoming-request-modal {
   display: flex;
+  flex-direction: column;
   gap: 12px;
-  background: #fef2f2;
-  border: 2px solid #ef4444;
+  background: #fff1f2;
+  border: 2px solid #e11d48;
   border-radius: var(--radius-lg);
-  padding: 14px;
+  padding: 16px;
   animation: popIn 0.25s ease-out;
+  box-shadow: 0 10px 25px rgba(225, 29, 72, 0.15);
 }
 
-.incoming-icon {
+.incoming-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.incoming-icon-alert {
   font-size: 32px;
+  animation: alertPulse 1.2s infinite alternate;
 }
 
-.incoming-content h4 {
-  margin: 0 0 4px;
-  font-size: 15px;
-  color: #b91c1c;
+@keyframes alertPulse {
+  from { transform: scale(0.9); }
+  to { transform: scale(1.15); }
 }
 
-.incoming-content p {
-  margin: 0 0 10px;
-  font-size: 12px;
+.incoming-title-box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.incoming-badge-pill {
+  font-size: 10px;
+  font-weight: 800;
+  color: #be123c;
+  letter-spacing: 0.5px;
+  background: #ffe4e6;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  display: inline-block;
+  width: fit-content;
+}
+
+.incoming-title-box h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  color: #9f1239;
+}
+
+.incoming-desc {
+  margin: 0;
+  font-size: 13px;
   color: #334155;
-  line-height: 1.4;
+  line-height: 1.5;
+}
+
+.incoming-report-preview {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  background: white;
+  border: 1px solid #fecdd3;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+}
+
+.preview-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preview-label {
+  font-size: 10px;
+  font-weight: 800;
+  color: #64748b;
 }
 
 .incoming-actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.relay-approve-btn {
+  background: #059669;
+  color: white;
+  font-weight: 800;
+  flex: 1;
+  padding: 12px;
+  font-size: 13px;
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.3);
+  transition: all 0.15s ease;
+}
+
+.relay-approve-btn:hover {
+  background: #047857;
+  transform: translateY(-1px);
+}
+
+/* Relay Success Banner */
+.relay-success-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f0fdf4;
+  border: 2px solid #16a34a;
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  animation: popIn 0.25s ease-out;
+}
+
+.relay-success-banner h4 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  color: #15803d;
+  font-weight: 800;
+}
+
+.relay-success-banner p {
+  margin: 0;
+  font-size: 12px;
+  color: #1e293b;
+  line-height: 1.5;
 }
 
 /* Discovered Peers Section */

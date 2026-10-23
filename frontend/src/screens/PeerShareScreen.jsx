@@ -7,6 +7,7 @@ import {
   getReports,
   getPendingReports,
   mergeReport,
+  markReportSynced,
   getOrCreateDeviceId,
 } from "../services/reportStorage";
 
@@ -34,16 +35,21 @@ export default function PeerShareScreen() {
   const [activeMode, setActiveMode] = useState("radar");
 
   // Autonomous Radar & Proximity State
-  const [autoRelayEnabled, setAutoRelayEnabled] = useState(true);
+  const [autoRelayEnabled, setAutoRelayEnabled] = useState(false); // Default false so prompt appears as requested
   const [localDeviceId, setLocalDeviceId] = useState("");
   const [localPendingCount, setLocalPendingCount] = useState(0);
   const [nearbyPeers, setNearbyPeers] = useState([]);
   const [incomingRequest, setIncomingRequest] = useState(null);
+  const [relaySuccessData, setRelaySuccessData] = useState(null);
+  const [isRelayingToCloud, setIsRelayingToCloud] = useState(false);
   const [bluetoothDevice, setBluetoothDevice] = useState(null);
   const [isScanningBluetooth, setIsScanningBluetooth] = useState(false);
   const [radarStatus, setRadarStatus] = useState("Scanning proximity...");
-  const syncedPeerIdsRef = useRef(new Set());
+
+  const approvedPeerIdsRef = useRef(new Set());
+  const dismissedPeerIdsRef = useRef(new Set());
   const isAutoSyncingRef = useRef(false);
+  const meshChannelRef = useRef(null);
 
   // QR Mode State
   const [qrSubMode, setQrSubMode] = useState("show");
@@ -69,13 +75,53 @@ export default function PeerShareScreen() {
 
   const p2pRef = useRef(null);
 
-  // 1. Initialize Local Device ID & Reports
+  // 1. Initialize Local Device ID & BroadcastChannel
   useEffect(() => {
     getOrCreateDeviceId().then((id) => setLocalDeviceId(id));
     getPendingReports().then((p) => setLocalPendingCount(p.length));
-  }, []);
 
-  // 2. Load Local Reports for QR generator
+    // Setup local BroadcastChannel for zero-network cross-window/tab proximity mesh
+    if (typeof BroadcastChannel !== "undefined") {
+      const channel = new BroadcastChannel("resqnet-proximity-mesh");
+      meshChannelRef.current = channel;
+
+      channel.onmessage = async (event) => {
+        const msg = event.data;
+        if (!msg || msg.deviceId === localDeviceId) return;
+
+        if (msg.type === "BEACON") {
+          // Received nearby peer beacon via direct radio broadcast channel
+          const peer = {
+            deviceId: msg.deviceId,
+            name: msg.name,
+            pendingCount: msg.pendingCount || 0,
+            pendingReports: msg.pendingReports || [],
+            lastSeen: Date.now(),
+          };
+
+          setNearbyPeers((prev) => {
+            const others = prev.filter((p) => p.deviceId !== peer.deviceId);
+            return [peer, ...others];
+          });
+
+          // Check if peer has emergency reports and we haven't handled them yet
+          if (
+            peer.pendingReports.length > 0 &&
+            !approvedPeerIdsRef.current.has(peer.deviceId) &&
+            !dismissedPeerIdsRef.current.has(peer.deviceId)
+          ) {
+            setIncomingRequest(peer);
+          }
+        }
+      };
+
+      return () => {
+        channel.close();
+      };
+    }
+  }, [localDeviceId]);
+
+  // 2. Load Local Reports
   const loadReports = useCallback(async () => {
     try {
       const reports = await getReports();
@@ -113,7 +159,7 @@ export default function PeerShareScreen() {
     };
   }, []);
 
-  // 4. Auto-Proximity Radar Heartbeat & Auto-Sync Loop
+  // 4. Auto-Proximity Radar Heartbeat & Peer Detection Loop
   useEffect(() => {
     if (!localDeviceId) return;
 
@@ -125,18 +171,44 @@ export default function PeerShareScreen() {
         const pending = await getPendingReports();
         if (isMounted) setLocalPendingCount(pending.length);
 
-        // 1. Broadcast presence beacon
+        // Compact pending reports payload for instant radio transmission
+        const compactPending = pending.slice(0, 5).map((r) => ({
+          id: r.id,
+          type: r.type || "General Emergency",
+          severity: r.severity || "Critical",
+          contactName: r.contactName || "Victim",
+          contactPhone: r.contactPhone || "",
+          people: Number(r.people) || 1,
+          description: r.description || "",
+          latitude: r.latitude ? Number(Number(r.latitude).toFixed(6)) : null,
+          longitude: r.longitude ? Number(Number(r.longitude).toFixed(6)) : null,
+          accuracy: r.accuracy ? Number(Number(r.accuracy).toFixed(1)) : null,
+          createdAt: r.createdAt || new Date().toISOString(),
+          revision: r.revision || 1,
+          relayHops: r.relayHops || 0,
+        }));
+
+        const beaconData = {
+          deviceId: localDeviceId,
+          name: `Victim Phone (${localDeviceId.slice(0, 6)})`,
+          pendingCount: pending.length,
+          pendingReports: compactPending,
+        };
+
+        // 1. Broadcast via local BroadcastChannel
+        meshChannelRef.current?.postMessage({
+          type: "BEACON",
+          ...beaconData,
+        });
+
+        // 2. Broadcast via local network / Hotspot signaling server
         await fetch(`${apiUrl}/p2p/beacon`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            deviceId: localDeviceId,
-            name: `ResQNet Peer (${localDeviceId.slice(0, 8)})`,
-            pendingCount: pending.length,
-          }),
+          body: JSON.stringify(beaconData),
         }).catch(() => {});
 
-        // 2. Query nearby active peers within radio / subnet proximity
+        // 3. Query active peers within radio proximity
         const res = await fetch(`${apiUrl}/p2p/peers?excludeId=${localDeviceId}`).catch(() => null);
         if (res && res.ok) {
           const data = await res.json();
@@ -145,84 +217,123 @@ export default function PeerShareScreen() {
             setNearbyPeers(peers);
             setRadarStatus(
               peers.length > 0
-                ? `${peers.length} nearby peer(s) detected in range`
-                : "Active radar pulse • Listening for nearby peers"
+                ? `${peers.length} nearby peer(s) in range (~10–30m)`
+                : "Active radar pulse • Listening for nearby peers (~10–30m)"
             );
-          }
 
-          // 3. Autonomous Zero-Touch Transfer Logic
-          if (peers.length > 0 && !isAutoSyncingRef.current) {
-            for (const peer of peers) {
-              const pairKey = [localDeviceId, peer.deviceId].sort().join("-");
-              // If either peer has pending reports and hasn't synced yet
-              if (
-                (peer.pendingCount > 0 || pending.length > 0) &&
-                !syncedPeerIdsRef.current.has(pairKey)
-              ) {
-                if (autoRelayEnabled) {
-                  // Execute automatic handshake in background
-                  executeAutonomousSync(peer, pairKey);
-                } else {
-                  // Prompt user for permission
-                  if (isMounted && !incomingRequest) {
+            // 4. Check for incoming relay requests
+            if (peers.length > 0) {
+              for (const peer of peers) {
+                if (
+                  peer.pendingReports &&
+                  peer.pendingReports.length > 0 &&
+                  !approvedPeerIdsRef.current.has(peer.deviceId) &&
+                  !dismissedPeerIdsRef.current.has(peer.deviceId)
+                ) {
+                  if (autoRelayEnabled && !isAutoSyncingRef.current) {
+                    // Auto-relay silently without prompt if toggle is enabled
+                    handleApproveAndUploadToCloud(peer);
+                  } else {
+                    // Trigger approval prompt on screen
                     setIncomingRequest(peer);
                   }
+                  break;
                 }
-                break;
               }
             }
           }
         }
       } catch (err) {
-        // Offline / silence in background
+        // Offline background loop
       }
     };
 
     pulseBeacon();
-    const interval = setInterval(pulseBeacon, 3500);
+    const interval = setInterval(pulseBeacon, 3000);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [localDeviceId, autoRelayEnabled, incomingRequest]);
+  }, [localDeviceId, autoRelayEnabled]);
 
-  // Autonomous Transfer Execution
-  const executeAutonomousSync = async (peer, pairKey) => {
-    isAutoSyncingRef.current = true;
+  // 5. User Approves Relay Request & Uploads to Cloud via their connection
+  const handleApproveAndUploadToCloud = async (peer) => {
+    if (!peer || !peer.pendingReports || peer.pendingReports.length === 0) return;
+
+    setIsRelayingToCloud(true);
     const apiUrl = getApiBaseUrl() || "http://localhost:4000/api";
-    const autoRoom = `AUTO-${[localDeviceId, peer.deviceId].sort().join("").slice(0, 12)}`;
+    let relayedCount = 0;
+    let uploadedCount = 0;
 
     setLogs((prev) => [
-      `[Auto-Mesh] Proximity detected peer ${peer.name}. Initiating zero-touch relay...`,
+      `[Relay] 🚨 Approved relay request from ${peer.name}. Ingesting ${peer.pendingReports.length} report(s)...`,
       ...prev,
     ]);
 
-    try {
-      // Deterministic host election (alphabetically first device ID acts as host)
-      const isHost = localDeviceId < peer.deviceId;
-      await p2pRef.current.joinRoomWithSignaling(apiUrl, autoRoom, isHost);
+    for (const report of peer.pendingReports) {
+      try {
+        // 1. Merge into local IndexedDB with incremented relay hop
+        const mergeRes = await mergeReport({
+          ...report,
+          relayHops: (report.relayHops || 0) + 1,
+        });
+        relayedCount += 1;
 
-      syncedPeerIdsRef.current.add(pairKey);
-      playSuccessBeep();
-      if (typeof navigator !== "undefined" && navigator.vibrate) {
-        navigator.vibrate([80, 40, 80]);
+        // 2. If this device has internet, upload directly to ResQNet Cloud API immediately!
+        if (navigator.onLine) {
+          const response = await fetch(`${apiUrl}/reports`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Idempotency-Key": `${report.id}-r${report.revision || 1}`,
+            },
+            body: JSON.stringify(mergeRes.report),
+          });
+
+          if (response.ok) {
+            const ack = await response.json().catch(() => ({}));
+            await markReportSynced(report.id, ack);
+            uploadedCount += 1;
+            setLogs((prev) => [
+              `[Cloud] ☁️ Uploaded victim report ${report.id} to ResQNet Cloud database!`,
+              ...prev,
+            ]);
+          }
+        }
+      } catch (err) {
+        setLogs((prev) => [`[Relay Error] ${err.message}`, ...prev]);
       }
+    }
 
-      setLogs((prev) => [
-        `[Auto-Mesh] ✅ Zero-touch relay complete with ${peer.name}!`,
-        ...prev,
-      ]);
-    } catch (err) {
-      setLogs((prev) => [`[Auto-Mesh] Sync attempt note: ${err.message}`, ...prev]);
-    } finally {
-      setTimeout(() => {
-        isAutoSyncingRef.current = false;
-      }, 5000);
+    // Mark peer as handled
+    approvedPeerIdsRef.current.add(peer.deviceId);
+    playSuccessBeep();
+    if (typeof navigator !== "undefined" && navigator.vibrate) {
+      navigator.vibrate([100, 50, 100, 50, 150]);
+    }
+
+    setRelaySuccessData({
+      peerName: peer.name,
+      reportsCount: relayedCount,
+      uploadedCount,
+      isOnline: navigator.onLine,
+      firstReport: peer.pendingReports[0],
+    });
+
+    setIncomingRequest(null);
+    setIsRelayingToCloud(false);
+    window.dispatchEvent(new CustomEvent("resqnet:reports-updated"));
+  };
+
+  const handleDismissRequest = () => {
+    if (incomingRequest) {
+      dismissedPeerIdsRef.current.add(incomingRequest.deviceId);
+      setIncomingRequest(null);
     }
   };
 
-  // Web Bluetooth Low Energy (BLE) Scan
+  // Web Bluetooth Scan
   const handleScanBluetooth = async () => {
     if (typeof navigator === "undefined" || !navigator.bluetooth) {
       alert(
@@ -239,7 +350,7 @@ export default function PeerShareScreen() {
       });
       setBluetoothDevice(device);
       setLogs((prev) => [
-        `[BLE] Discovered Bluetooth Device: ${device.name || "Unknown ResQNet Beacon"} (${device.id.slice(0, 8)})`,
+        `[BLE] Discovered Bluetooth Device: ${device.name || "Nearby Bluetooth Node"} (${device.id.slice(0, 8)})`,
         ...prev,
       ]);
     } catch (err) {
@@ -420,7 +531,7 @@ export default function PeerShareScreen() {
         <p className="eyebrow">AUTONOMOUS AD-HOC MESH</p>
         <h2>Nearby Emergency Radar</h2>
         <p className="subheading">
-          Devices in Bluetooth / Wi-Fi range automatically discover each other and exchange emergency reports without meeting.
+          Devices in range (~10–30m) automatically detect victims and request permission to relay reports to the cloud.
         </p>
       </div>
 
@@ -433,7 +544,7 @@ export default function PeerShareScreen() {
             stopScanner();
           }}
         >
-          🛰️ Auto Proximity Radar (Zero-Touch ⭐)
+          🛰️ Auto Proximity Radar (~10m ⭐)
         </button>
         <button
           className={`mode-tab-btn ${activeMode === "qr" ? "active" : ""}`}
@@ -456,16 +567,16 @@ export default function PeerShareScreen() {
       </div>
 
       {/* ===================================================================
-          MODE 1: AUTONOMOUS PROXIMITY RADAR (ZERO-TOUCH AUTOMATIC RELAY)
+          MODE 1: AUTONOMOUS PROXIMITY RADAR (~10M RANGE)
           =================================================================== */}
       {activeMode === "radar" && (
         <div className="p2p-card proximity-radar-card">
           {/* Autonomous Relay Toggle */}
           <div className="auto-relay-header">
             <div className="auto-relay-info">
-              <strong>⚡ Autonomous Auto-Relay</strong>
+              <strong>⚡ Auto-Approve Relay</strong>
               <p>
-                When enabled, data transfers <strong>automatically</strong> to any nearby phone that enters your range. No meeting or manual action needed!
+                When enabled, data transfers <strong>automatically</strong> to any nearby phone. When disabled, you receive an <strong>approval prompt</strong> to permit upload.
               </p>
             </div>
             <label className="toggle-switch">
@@ -486,10 +597,10 @@ export default function PeerShareScreen() {
               <div className="radar-axis axis-vertical" />
               <div className="radar-axis axis-diagonal-1" />
               <div className="radar-axis axis-diagonal-2" />
-              <div className="radar-grid-ring ring-1"><span className="ring-label">25m</span></div>
-              <div className="radar-grid-ring ring-2"><span className="ring-label">50m</span></div>
-              <div className="radar-grid-ring ring-3"><span className="ring-label">75m</span></div>
-              <div className="radar-grid-ring ring-4"><span className="ring-label">100m</span></div>
+              <div className="radar-grid-ring ring-1"><span className="ring-label">10m</span></div>
+              <div className="radar-grid-ring ring-2"><span className="ring-label">20m</span></div>
+              <div className="radar-grid-ring ring-3"><span className="ring-label">30m</span></div>
+              <div className="radar-grid-ring ring-4"><span className="ring-label">50m</span></div>
 
               {/* Ambient Expanding Sonar Echo */}
               <div className="sonar-ambient-wave" />
@@ -533,41 +644,98 @@ export default function PeerShareScreen() {
             </div>
           </div>
 
-          {/* Incoming Peer Transfer Request Prompt (when Auto-Relay is OFF) */}
-          {incomingRequest && !autoRelayEnabled && (
+          {/* INCOMING RELAY PERMISSION REQUEST PROMPT (Appears on Device B) */}
+          {incomingRequest && (
             <div className="incoming-request-modal">
-              <div className="incoming-icon">🔔</div>
-              <div className="incoming-content">
-                <h4>Nearby Peer Detected!</h4>
-                <p>
-                  <strong>{incomingRequest.name}</strong> is in physical range with{" "}
-                  <strong className="text-danger">{incomingRequest.pendingCount} emergency report(s)</strong> waiting to be relayed.
-                </p>
-                <div className="incoming-actions">
-                  <button
-                    className="primary-button"
-                    onClick={() => {
-                      executeAutonomousSync(
-                        incomingRequest,
-                        [localDeviceId, incomingRequest.deviceId].sort().join("-")
-                      );
-                      setIncomingRequest(null);
-                    }}
-                  >
-                    Accept & Relay Data Now
-                  </button>
-                  <button
-                    className="text-button"
-                    onClick={() => setIncomingRequest(null)}
-                  >
-                    Dismiss
-                  </button>
+              <div className="incoming-header-row">
+                <div className="incoming-icon-alert">🚨</div>
+                <div className="incoming-title-box">
+                  <span className="incoming-badge-pill">NEARBY VICTIM IN RANGE (~10M)</span>
+                  <h4>Emergency Relay Request</h4>
                 </div>
+              </div>
+
+              <p className="incoming-desc">
+                <strong>{incomingRequest.name}</strong> is offline with{" "}
+                <strong className="text-danger">{incomingRequest.pendingCount} emergency report(s)</strong>.
+                They need your connection to upload their emergency report to the ResQNet Cloud.
+              </p>
+
+              {incomingRequest.pendingReports?.[0] && (
+                <div className="incoming-report-preview">
+                  <div className="preview-field">
+                    <span className="preview-label">INCIDENT:</span>
+                    <strong>{incomingRequest.pendingReports[0].type}</strong>
+                  </div>
+                  <div className="preview-field">
+                    <span className="preview-label">VICTIM NAME:</span>
+                    <strong>{incomingRequest.pendingReports[0].contactName || "Anonymous"}</strong>
+                  </div>
+                  <div className="preview-field">
+                    <span className="preview-label">PEOPLE IN DANGER:</span>
+                    <strong className="text-danger">{incomingRequest.pendingReports[0].people} trapped</strong>
+                  </div>
+                  {incomingRequest.pendingReports[0].latitude && (
+                    <div className="preview-field">
+                      <span className="preview-label">GPS LOCATION:</span>
+                      <strong>
+                        {incomingRequest.pendingReports[0].latitude.toFixed(4)},{" "}
+                        {incomingRequest.pendingReports[0].longitude.toFixed(4)}
+                      </strong>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="incoming-actions">
+                <button
+                  className="primary-button relay-approve-btn"
+                  onClick={() => handleApproveAndUploadToCloud(incomingRequest)}
+                  disabled={isRelayingToCloud}
+                >
+                  {isRelayingToCloud ? "Uploading to Cloud..." : "⚡ Approve & Upload to Cloud (Via My Data)"}
+                </button>
+                <button
+                  className="choice"
+                  onClick={handleDismissRequest}
+                  disabled={isRelayingToCloud}
+                >
+                  Dismiss
+                </button>
               </div>
             </div>
           )}
 
-          {/* Discovered Peers List */}
+          {/* RELAY SUCCESS CELEBRATION BANNER */}
+          {relaySuccessData && (
+            <div className="relay-success-banner">
+              <div className="success-icon-badge">✅</div>
+              <div className="success-content">
+                <h4>Emergency Report Relayed & Uploaded!</h4>
+                <p>
+                  Successfully received report from <strong>{relaySuccessData.peerName}</strong>.
+                  {relaySuccessData.uploadedCount > 0 ? (
+                    <span className="text-success">
+                      {" "}☁️ Uploaded directly to ResQNet Cloud Database via your mobile internet! Rescuers are now notified.
+                    </span>
+                  ) : (
+                    <span>
+                      {" "}💾 Saved to your phone's database. It will auto-upload the instant you get cellular data.
+                    </span>
+                  )}
+                </p>
+                <button
+                  className="secondary-button"
+                  onClick={() => setRelaySuccessData(null)}
+                  style={{ marginTop: "8px" }}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Discovered Peers Section */}
           <div className="nearby-peers-section">
             <div className="peers-section-header">
               <h4>Active Devices in Range ({nearbyPeers.length})</h4>
@@ -593,7 +761,8 @@ export default function PeerShareScreen() {
                   No other ResQNet devices currently broadcasting in range.
                   <br />
                   <small>
-                    As soon as a victim, rescuer, or volunteer enters your Bluetooth/Wi-Fi range, they will appear here and data will transfer automatically.
+                    💡 <strong>How to test with 2 phones:</strong> Keep both phones within 10 meters on the same Wi-Fi / Hotspot.
+                    When Phone A submits an SOS, Phone B will immediately receive the Permission Request to upload to the Cloud!
                   </small>
                 </p>
               </div>
@@ -607,7 +776,7 @@ export default function PeerShareScreen() {
                         <strong>{peer.name}</strong>
                         <span className="peer-id-sub">ID: {peer.deviceId.slice(0, 10)}...</span>
                       </div>
-                      <span className="proximity-chip">🟢 In Range</span>
+                      <span className="proximity-chip">🟢 In Range (~10m)</span>
                     </div>
 
                     <div className="peer-card-bottom">
@@ -618,17 +787,15 @@ export default function PeerShareScreen() {
                           <span className="text-success">✅ In Sync</span>
                         )}
                       </span>
-                      <button
-                        className="choice-small"
-                        onClick={() =>
-                          executeAutonomousSync(
-                            peer,
-                            [localDeviceId, peer.deviceId].sort().join("-")
-                          )
-                        }
-                      >
-                        Force Relay ⚡
-                      </button>
+                      {peer.pendingCount > 0 && (
+                        <button
+                          className="choice-small"
+                          onClick={() => handleApproveAndUploadToCloud(peer)}
+                          disabled={isRelayingToCloud}
+                        >
+                          Relay & Upload ⚡
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -835,13 +1002,13 @@ export default function PeerShareScreen() {
 
       {/* Store and Forward Explainer */}
       <div className="relay-explainer-card">
-        <strong>🛡️ How Autonomous Store-and-Forward Works:</strong>
+        <strong>🛡️ How 10-Meter Proximity Relay Works:</strong>
         <p>
-          1. <strong>Passive Detection:</strong> ResQNet broadcasts an offline proximity beacon over Bluetooth & Wi-Fi radios.
+          1. <strong>Passive Detection:</strong> Victim device broadcasts its emergency beacon over local radio (~10–30m).
           <br />
-          2. <strong>Zero-Touch Handshake:</strong> When two devices come within ~30–100 meters, they automatically pair and transfer reports without either victim or rescuer needing to open a menu.
+          2. <strong>Permission Prompt:</strong> Any nearby phone with internet receives an instant alert to approve relaying the victim's report.
           <br />
-          3. <strong>Opportunistic Upload:</strong> When any helper reaches cellular service or a field command post, all accumulated incident records push to the cloud in real-time!
+          3. <strong>Instant Cloud Ingestion:</strong> The moment the helper taps "Approve", the victim's emergency report is uploaded to the ResQNet Cloud & Rescuer Dashboard!
         </p>
       </div>
 

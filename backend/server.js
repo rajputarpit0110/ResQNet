@@ -225,11 +225,11 @@ app.get(["/p2p/signal/:roomId", "/api/p2p/signal/:roomId"], (req, res) => {
 
 // --- Autonomous Proximity Beacon & Peer Discovery ---
 app.post(["/p2p/beacon", "/api/p2p/beacon"], (req, res) => {
-  const { deviceId, name, pendingCount } = req.body || {};
+  const { deviceId, name, pendingCount, pendingReports } = req.body || {};
   if (!deviceId) {
     return res.status(400).json({ error: "deviceId required" });
   }
-  db.registerBeacon({ deviceId, name, pendingCount });
+  db.registerBeacon({ deviceId, name, pendingCount, pendingReports });
   res.status(200).json({ success: true });
 });
 

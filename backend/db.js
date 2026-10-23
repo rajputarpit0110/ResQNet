@@ -283,14 +283,16 @@ export const db = {
   },
 
   // Proximity Mesh Beaconing & Discovery
-  registerBeacon({ deviceId, name, pendingCount }) {
+  registerBeacon({ deviceId, name, pendingCount, pendingReports }) {
     if (!global.resqnetBeacons) {
       global.resqnetBeacons = new Map();
     }
+    const reports = Array.isArray(pendingReports) ? pendingReports.slice(0, 10) : [];
     global.resqnetBeacons.set(deviceId, {
       deviceId,
       name: name || `Device ${deviceId.slice(0, 8)}`,
-      pendingCount: Number(pendingCount) || 0,
+      pendingCount: Number(pendingCount) || reports.length,
+      pendingReports: reports,
       lastSeen: Date.now(),
     });
   },

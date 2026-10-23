@@ -221,14 +221,21 @@ describe("ResQNet Backend API Test Suite", () => {
   });
 
   test("P2P beacon and nearby peers discovery should register and list active devices", async () => {
-    // 1. Post beacon from Device Alpha
+    // 1. Post beacon from Device Alpha with pending emergency report
+    const mockReport = {
+      id: "RQ-TEST-BEACON-1",
+      type: "Trapped",
+      contactName: "Rahul Sharma",
+      people: 2,
+    };
     const postBeacon = await fetch(`${baseUrl}/api/p2p/beacon`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         deviceId: "dev-alpha-123",
         name: "Victim Rahul",
-        pendingCount: 2,
+        pendingCount: 1,
+        pendingReports: [mockReport],
       }),
     });
     assert.strictEqual(postBeacon.status, 200);
@@ -241,6 +248,8 @@ describe("ResQNet Backend API Test Suite", () => {
     const alpha = peersData.peers.find((p) => p.deviceId === "dev-alpha-123");
     assert.ok(alpha);
     assert.strictEqual(alpha.name, "Victim Rahul");
-    assert.strictEqual(alpha.pendingCount, 2);
+    assert.strictEqual(alpha.pendingCount, 1);
+    assert.strictEqual(alpha.pendingReports.length, 1);
+    assert.strictEqual(alpha.pendingReports[0].id, "RQ-TEST-BEACON-1");
   });
 });
