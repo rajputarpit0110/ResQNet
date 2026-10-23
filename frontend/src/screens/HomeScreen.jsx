@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import InstallAppBanner from "../components/InstallAppBanner";
 
 export default function HomeScreen({
   onManualReport,
@@ -79,6 +80,9 @@ export default function HomeScreen({
           </svg>
         </div>
       </div>
+
+      {/* PWA 1-Click Install Banner */}
+      <InstallAppBanner />
 
       {/* Active Emergency Alert Card (if triggered) */}
       {activeEmergency && (
