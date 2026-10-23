@@ -10,9 +10,24 @@ let syncBackoffMs = 1000;
 const MAX_BACKOFF_MS = 60000;
 
 export function getApiBaseUrl() {
-  const envUrl = import.meta.env.VITE_RESQNET_API_URL;
-  if (!envUrl) return null;
-  return envUrl.replace(/\/+$/, "");
+  const envUrl = typeof import.meta !== "undefined" ? import.meta.env?.VITE_RESQNET_API_URL : null;
+
+  // In a browser environment:
+  if (typeof window !== "undefined" && window.location?.origin) {
+    // If an external production URL is explicitly provided and not localhost, honor it
+    if (envUrl && !envUrl.includes("localhost") && !envUrl.includes("127.0.0.1") && envUrl.startsWith("http")) {
+      return envUrl.replace(/\/+$/, "");
+    }
+    // Universal dynamic resolution: always send requests to the server hosting this app
+    // Works on Render, local Wi-Fi IP, and localhost seamlessly across all mobile devices
+    return `${window.location.origin}/api`;
+  }
+
+  // Node.js test environment fallback:
+  if (envUrl && envUrl.startsWith("http")) {
+    return envUrl.replace(/\/+$/, "");
+  }
+  return "http://localhost:4000/api";
 }
 
 export function isReportSyncConfigured() {
