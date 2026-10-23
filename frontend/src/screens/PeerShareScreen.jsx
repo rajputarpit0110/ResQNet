@@ -5,6 +5,7 @@ import { getApiBaseUrl } from "../services/reportSync";
 export default function PeerShareScreen() {
   const [connectionMode, setConnectionMode] = useState("network"); // "network" or "offline"
   const [roomId, setRoomId] = useState("ROOM-101");
+  const [isHost, setIsHost] = useState(false);
   const [status, setStatus] = useState("idle");
   const [statusDetail, setStatusDetail] = useState("");
   const [logs, setLogs] = useState([]);
