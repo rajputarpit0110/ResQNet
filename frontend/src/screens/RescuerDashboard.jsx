@@ -33,6 +33,7 @@ export default function RescuerDashboard() {
   const [triageNotesInput, setTriageNotesInput] = useState("");
   const [isUpdatingTriage, setIsUpdatingTriage] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState("");
+  const [previewPhoto, setPreviewPhoto] = useState(null);
 
   const baseUrl = getApiBaseUrl() || "http://localhost:4000/api";
 
@@ -326,25 +327,74 @@ export default function RescuerDashboard() {
                     radius={8}
                     pathOptions={{ color: "#ffffff", weight: 2, fillColor: color, fillOpacity: 1 }}
                   >
-                    <Popup>
-                      <strong>{r.id}</strong> ({r.type})
-                      <br />
-                      Severity: <strong>{r.severity}</strong>
-                      <br />
-                      People: {r.people || 1}
-                      <br />
-                      Triage: <strong>{(r.triageStatus || "new").toUpperCase()}</strong>
-                      <br />
-                      <button
-                        className="text-button"
-                        onClick={() => {
-                          setSelectedReport(r);
-                          setTriageStatusInput(r.triageStatus || "acknowledged");
-                          setTriageNotesInput(r.triageNotes || "");
-                        }}
-                      >
-                        Manage Triage
-                      </button>
+                    <Popup maxWidth={280}>
+                      <div className="map-popup-card">
+                        <div className="map-popup-header">
+                          <strong className="map-popup-title">{r.type}</strong>
+                          <span className={`severity-tag ${(r.severity || "unknown").toLowerCase()}`}>
+                            {r.severity}
+                          </span>
+                        </div>
+
+                        <div className="map-popup-id">#{r.id}</div>
+
+                        <div className="map-popup-victim">
+                          <strong>👤 {r.contactName || "Emergency Caller"}</strong>
+                          {r.contactPhone ? (
+                            <a href={`tel:${r.contactPhone}`} className="map-popup-phone">
+                              📞 {r.contactPhone}
+                            </a>
+                          ) : (
+                            <span className="text-muted"> (No phone)</span>
+                          )}
+                        </div>
+
+                        <p className="map-popup-desc">
+                          {r.description || "Immediate emergency assistance required."}
+                        </p>
+
+                        <div className="map-popup-meta">
+                          <span>👥 {r.people || 1} {r.people === 1 || r.people === "1" ? "person" : "people"}</span>
+                          <span>Status: <strong>{(r.triageStatus || "new").toUpperCase()}</strong></span>
+                        </div>
+
+                        {r.photoDataUrl && (
+                          <div className="map-popup-photo">
+                            <img
+                              src={r.photoDataUrl}
+                              alt="Scene"
+                              onClick={() => setPreviewPhoto(r.photoDataUrl)}
+                              style={{ width: "100%", maxHeight: "90px", objectFit: "cover", borderRadius: "6px", cursor: "pointer", marginTop: "4px" }}
+                            />
+                          </div>
+                        )}
+
+                        {r.audioDataUrl && (
+                          <audio controls src={r.audioDataUrl} style={{ width: "100%", height: "30px", marginTop: "6px" }} />
+                        )}
+
+                        <div className="map-popup-actions" style={{ display: "flex", gap: "6px", marginTop: "8px" }}>
+                          <a
+                            href={`https://www.google.com/maps/dir/?api=1&destination=${r.latitude},${r.longitude}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="map-nav-btn"
+                            style={{ flex: 1, padding: "5px 8px", background: "#176b4d", color: "white", borderRadius: "4px", textDecoration: "none", fontSize: "11px", fontWeight: "700", textAlign: "center" }}
+                          >
+                            🧭 Navigate ↗
+                          </a>
+                          <button
+                            className="text-button"
+                            onClick={() => {
+                              setSelectedReport(r);
+                              setTriageStatusInput(r.triageStatus || "acknowledged");
+                              setTriageNotesInput(r.triageNotes || "");
+                            }}
+                          >
+                            Triage
+                          </button>
+                        </div>
+                      </div>
                     </Popup>
                   </CircleMarker>
                 </div>
@@ -385,28 +435,108 @@ export default function RescuerDashboard() {
                   </span>
                 </div>
 
-                <p>{report.description || "No description provided."}</p>
+                {/* --- Complete Victim Identity Section --- */}
+                <div className="victim-identity-box">
+                  <div className="victim-meta-row">
+                    <div className="victim-field">
+                      <span className="victim-meta-label">👤 CALLER / VICTIM NAME</span>
+                      <strong className="victim-meta-value">
+                        {report.contactName || "Emergency Caller (Name not provided)"}
+                      </strong>
+                    </div>
 
-                <div className="report-details">
-                  <span>{report.people || 1} affected</span>
-                  {report.latitude != null && report.longitude != null ? (
-                    <a
-                      href={`https://www.google.com/maps?q=${report.latitude},${report.longitude}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {report.latitude.toFixed(5)}, {report.longitude.toFixed(5)} (±
-                      {Math.round(report.accuracy || 0)}m)
-                    </a>
+                    <div className="victim-field">
+                      <span className="victim-meta-label">👥 PEOPLE IN DANGER</span>
+                      <strong className="victim-meta-value people-alert">
+                        {report.people || 1} {report.people === "1" || report.people === 1 ? "person" : "people"} in danger
+                      </strong>
+                    </div>
+                  </div>
+
+                  {report.contactPhone ? (
+                    <div className="victim-phone-action">
+                      <span className="victim-meta-label">📞 VICTIM CONTACT PHONE</span>
+                      <a href={`tel:${report.contactPhone}`} className="victim-phone-link">
+                        <span>📞 {report.contactPhone}</span>
+                        <span className="call-now-badge">Tap to Call Directly</span>
+                      </a>
+                    </div>
                   ) : (
-                    <span>No GPS fix</span>
+                    <div className="victim-phone-action muted">
+                      <span className="victim-meta-label">📞 VICTIM CONTACT PHONE</span>
+                      <span className="victim-phone-none">No phone number attached</span>
+                    </div>
                   )}
-                  {report.relayHops > 0 && (
-                    <span className="relay-badge">Relayed via {report.relayHops} peers</span>
+                </div>
+
+                {/* --- Description / Situation Details --- */}
+                <div className="victim-description-box">
+                  <span className="victim-meta-label">📝 SITUATION & RESCUE DETAILS</span>
+                  <p className="victim-desc-text">
+                    {report.description || "No written description provided. Direct SOS beacon triggered."}
+                  </p>
+                </div>
+
+                {/* --- Audio Voice Message --- */}
+                {report.audioDataUrl && (
+                  <div className="victim-media-block">
+                    <span className="victim-meta-label">🎙️ VICTIM VOICE RECORDING</span>
+                    <audio controls src={report.audioDataUrl} className="victim-audio-player" />
+                  </div>
+                )}
+
+                {/* --- Scene Photo --- */}
+                {report.photoDataUrl && (
+                  <div className="victim-media-block">
+                    <div className="photo-header-row">
+                      <span className="victim-meta-label">📸 ATTACHED SCENE PHOTO</span>
+                      <span className="photo-tap-hint">Tap photo to enlarge full-screen</span>
+                    </div>
+                    <img
+                      src={report.photoDataUrl}
+                      alt="Victim disaster scene"
+                      className="victim-photo-thumbnail"
+                      onClick={() => setPreviewPhoto(report.photoDataUrl)}
+                    />
+                  </div>
+                )}
+
+                {/* --- Navigation & Location --- */}
+                <div className="victim-location-box">
+                  {report.latitude != null && report.longitude != null ? (
+                    <>
+                      <div className="coords-info">
+                        <span className="victim-meta-label">📍 EXACT GPS COORDINATES (WGS84)</span>
+                        <strong>
+                          {report.latitude.toFixed(6)}, {report.longitude.toFixed(6)}
+                          <span className="accuracy-chip">±{Math.round(report.accuracy || 0)}m</span>
+                        </strong>
+                      </div>
+                      <a
+                        href={`https://www.google.com/maps/dir/?api=1&destination=${report.latitude},${report.longitude}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rescuer-nav-link-btn"
+                      >
+                        🧭 Start Turn-by-Turn GPS Navigation to Victim ↗
+                      </a>
+                    </>
+                  ) : (
+                    <div className="coords-info warning">
+                      <span className="victim-meta-label">📍 GPS LOCATION</span>
+                      <span className="text-warning">GPS coordinates not locked by victim's device</span>
+                    </div>
                   )}
-                  {report.cloudReceivedAt && (
-                    <span>Cloud: {new Date(report.cloudReceivedAt).toLocaleTimeString()}</span>
-                  )}
+                </div>
+
+                {/* --- Technical Telemetry & Provenance --- */}
+                <div className="report-provenance-row">
+                  <span>⏱️ Incident: {new Date(report.createdAt).toLocaleTimeString()} ({new Date(report.createdAt).toLocaleDateString()})</span>
+                  <span>
+                    📡 Route:{" "}
+                    {report.relayHops > 0 ? `${report.relayHops} P2P peer hops` : "Direct Cloud Sync"}
+                  </span>
+                  <span>💻 Device: {report.deviceId ? `${report.deviceId.slice(0, 16)}...` : "Direct"}</span>
                 </div>
 
                 {report.triageNotes && (
@@ -471,6 +601,27 @@ export default function RescuerDashboard() {
               </article>
             ))
           )}
+        </div>
+      )}
+      {/* Photo Lightbox Modal */}
+      {previewPhoto && (
+        <div className="photo-lightbox-backdrop" onClick={() => setPreviewPhoto(null)}>
+          <div className="photo-lightbox-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="lightbox-header">
+              <h4>📸 Scene Inspection Photo</h4>
+              <button className="lightbox-close" onClick={() => setPreviewPhoto(null)}>
+                ✕
+              </button>
+            </div>
+            <img src={previewPhoto} alt="Disaster Scene Inspection" className="lightbox-img" />
+            <button
+              className="primary-button"
+              onClick={() => setPreviewPhoto(null)}
+              style={{ marginTop: "14px", width: "100%" }}
+            >
+              Close Inspection
+            </button>
+          </div>
         </div>
       )}
     </div>
