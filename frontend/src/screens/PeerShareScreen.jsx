@@ -481,14 +481,29 @@ export default function PeerShareScreen() {
           {/* Radar Animation & Visualizer */}
           <div className="radar-visual-container">
             <div className="sonar-radar-box">
+              {/* Static Tactical Grid & Range Rings */}
+              <div className="radar-axis axis-horizontal" />
+              <div className="radar-axis axis-vertical" />
+              <div className="radar-axis axis-diagonal-1" />
+              <div className="radar-axis axis-diagonal-2" />
+              <div className="radar-grid-ring ring-1"><span className="ring-label">25m</span></div>
+              <div className="radar-grid-ring ring-2"><span className="ring-label">50m</span></div>
+              <div className="radar-grid-ring ring-3"><span className="ring-label">75m</span></div>
+              <div className="radar-grid-ring ring-4"><span className="ring-label">100m</span></div>
+
+              {/* Ambient Expanding Sonar Echo */}
+              <div className="sonar-ambient-wave" />
+
+              {/* 360-degree phosphor sweep beam */}
+              <div className="radar-sweep-beam">
+                <div className="sweep-beam-lead" />
+              </div>
+
+              {/* Center Self-Blip */}
               <div className="radar-center-blip">
                 <span className="blip-core" />
-                <span className="blip-label">You ({localDeviceId ? localDeviceId.slice(0, 6) : "Self"})</span>
+                <span className="blip-badge">You ({localDeviceId ? localDeviceId.slice(0, 6) : "Self"})</span>
               </div>
-              <div className="sonar-wave wave-1" />
-              <div className="sonar-wave wave-2" />
-              <div className="sonar-wave wave-3" />
-              <div className="radar-sweep-line" />
 
               {/* Orbiting Nearby Peer Blips */}
               {nearbyPeers.map((peer, idx) => (
@@ -508,8 +523,10 @@ export default function PeerShareScreen() {
             </div>
 
             <div className="radar-status-bar">
-              <span className="radar-pulse-dot" />
-              <span className="radar-status-text">{radarStatus}</span>
+              <div className="radar-status-left">
+                <span className="radar-pulse-dot" />
+                <span className="radar-status-text">{radarStatus}</span>
+              </div>
               <span className="radar-pending-pill">
                 📦 {localPendingCount} report(s) on your device
               </span>
