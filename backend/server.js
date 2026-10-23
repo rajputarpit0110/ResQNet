@@ -7,6 +7,14 @@ import { fileURLToPath } from "node:url";
 import { db } from "./db.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const envPath = path.resolve(__dirname, ".env");
+if (typeof process.loadEnvFile === "function" && fs.existsSync(envPath)) {
+  try {
+    process.loadEnvFile(envPath);
+  } catch (err) {
+    console.warn("Could not load backend .env file:", err.message);
+  }
+}
 const frontendDist = path.resolve(__dirname, "../frontend/dist");
 
 const app = express();
