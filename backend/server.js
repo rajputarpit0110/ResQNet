@@ -1,7 +1,13 @@
 import express from "express";
 import cors from "cors";
 import crypto from "node:crypto";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { db } from "./db.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const frontendDist = path.resolve(__dirname, "../frontend/dist");
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -192,6 +198,22 @@ app.get(["/p2p/signal/:roomId", "/api/p2p/signal/:roomId"], (req, res) => {
   }
   res.status(200).json(signal);
 });
+
+// Serve frontend static assets in production if built
+if (fs.existsSync(frontendDist)) {
+  app.use(express.static(frontendDist));
+  app.get("*", (req, res, next) => {
+    // Pass API, health, and signaling routes through if unmatched
+    if (
+      req.path.startsWith("/api") ||
+      req.path.startsWith("/health") ||
+      req.path.startsWith("/p2p")
+    ) {
+      return next();
+    }
+    res.sendFile(path.join(frontendDist, "index.html"));
+  });
+}
 
 // Export app for testing and start server if run directly
 export { app };

@@ -10,6 +10,7 @@
     "dev:frontend": "cd frontend && npm run dev",
     "dev": "node -e \"const { spawn } = require('child_process'); spawn('npm', ['run', 'dev'], { cwd: 'backend', stdio: 'inherit', shell: true }); spawn('npm', ['run', 'dev'], { cwd: 'frontend', stdio: 'inherit', shell: true });\"",
     "build": "cd frontend && npm run build",
+    "render-build": "npm install --prefix backend && npm install --prefix frontend && cd frontend && npm run build",
     "lint": "cd frontend && npm run lint",
     "test:backend": "cd backend && npm test",
     "test:frontend": "cd frontend && npm test",
